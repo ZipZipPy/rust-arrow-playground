@@ -1,0 +1,30 @@
+# The Dockerfile copies only server/ and web/, and rebuilds every artifact
+# inside the image. Keeping the rest out of the context keeps uploads small
+# (target/ and node_modules/ can be gigabytes) and avoids cache busts.
+
+# Build output and dependencies
+**/target
+**/node_modules
+web/dist
+**/*.tsbuildinfo
+
+# Not needed to build the image
+.git
+.github
+deploy
+docs
+*.md
+Makefile
+docker-compose.yml
+rust-toolchain.toml
+
+# Local configuration, secrets and exported data
+.env
+.env.*
+exports
+
+# Editors and operating systems
+.idea
+.vscode
+**/*.swp
+**/.DS_Store
