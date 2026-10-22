@@ -3,9 +3,10 @@
 // same functions the browser uses. Skipped when the fixture directory is absent.
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { basename, extname, join, relative } from 'node:path';
+import { DataType } from 'apache-arrow';
 import { describe, expect, it } from 'vitest';
 import { parquet } from '../test/parquetNode';
-import { type Decoded, decodeArrowIpc, decodeJson, decodeParquet, previewRows, rowCount, useColumnValue } from './decode';
+import { type Decoded, decodeArrowIpc, decodeJson, decodeParquet, previewRows, rowCount, useValues } from './decode';
 
 const DIR = process.env.FIXTURES_DIR ?? '/tmp/claude-0/fixtures';
 const ARROW_EXTENSIONS = new Set(['.arrow', '.arrows', '.ipc', '.feather']);
@@ -69,7 +70,15 @@ describe.skipIf(fixtures.length === 0)(`server fixtures in ${DIR}`, () => {
     expect(pickColumns(mine), basename(f.name)).toEqual(pickColumns(theirs));
 
     for (const column of ['total', 'id', 'rating'].filter((c) => shared.includes(c))) {
-      expect(useColumnValue(d, column)).toBeCloseTo(useColumnValue(json, column), 3);
+      expect(useValues(d, [column])).toBeCloseTo(useValues(json, [column]), 3);
     }
+
+    // "Every value" reads the same values in both (dates are text in JSON, so they are left out).
+    if (d.kind !== 'arrow') return;
+    const comparable = d.table.schema.fields
+      .filter((f) => shared.includes(f.name) && !DataType.isTimestamp(f.type) && !DataType.isDate(f.type))
+      .map((f) => f.name);
+    const [mineSum, theirsSum] = [useValues(d, comparable), useValues(json, comparable)];
+    expect(Math.abs(mineSum - theirsSum)).toBeLessThanOrEqual(Math.abs(theirsSum) * 1e-9);
   });
 });

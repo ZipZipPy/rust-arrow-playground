@@ -7,7 +7,7 @@ use std::ops::RangeInclusive;
 use std::str::FromStr;
 
 use crate::encode::{Encoding, Format, IpcCompression, ParquetCompression};
-use crate::schema::{ColumnSelection, TABLE};
+use crate::schema::{ColumnSelection, DEFAULT_DATASET, Dataset};
 
 pub const DEFAULT_ROWS: u64 = 10_000;
 pub const DEFAULT_BENCH_ROWS: u64 = 100_000;
@@ -85,18 +85,20 @@ impl Params {
         })
     }
 
-    fn columns(&self) -> Result<ColumnSelection, ParamError> {
-        ColumnSelection::parse(self.get("columns").unwrap_or_default())
+    fn columns(&self, dataset: &Dataset) -> Result<ColumnSelection, ParamError> {
+        ColumnSelection::parse(dataset, self.get("columns").unwrap_or_default())
             .map_err(|err| ParamError(err.to_string()))
     }
 
     fn rows_query(&self, default_rows: u64, max_rows: u64) -> Result<RowsQuery, ParamError> {
+        let dataset = self.keyword("dataset", DEFAULT_DATASET)?;
         let rows = self.integer("rows", default_rows.min(max_rows), 1..=max_rows)?;
         let offset = self.integer("offset", 0, OFFSET_RANGE)?;
         Ok(RowsQuery {
-            after_id: offset as i64,
+            dataset,
+            after_key: offset as i64,
             limit: rows as i64,
-            columns: self.columns()?,
+            columns: self.columns(dataset)?,
         })
     }
 }
@@ -117,33 +119,48 @@ pub fn parse_bool(value: &str) -> Option<bool> {
 /// Which rows to read. Also the row cache key.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RowsQuery {
-    /// Keyset pagination: rows with `id > after_id`.
-    pub after_id: i64,
+    pub dataset: &'static Dataset,
+    /// Keyset pagination: rows with `<key> > after_key`.
+    pub after_key: i64,
     pub limit: i64,
     pub columns: ColumnSelection,
 }
 
 impl RowsQuery {
-    /// `SELECT <cols> FROM orders WHERE id > $1 ORDER BY id LIMIT $2`, with
-    /// column names taken from the catalog, never from the request.
+    /// Every column of `dataset`, the first `limit` rows.
+    pub fn all_columns(dataset: &'static Dataset, after_key: i64, limit: i64) -> Self {
+        Self {
+            dataset,
+            after_key,
+            limit,
+            columns: ColumnSelection::all(dataset),
+        }
+    }
+
+    /// `SELECT <cols> FROM <relation> WHERE <key> > $1 ORDER BY <key> LIMIT $2`,
+    /// with every identifier taken from the catalog, never from the request.
     ///
-    /// When `id` is not selected it is appended as an extra last column, so
-    /// the id of the last row is always known; encoders only look at the
+    /// When the key is not selected it is appended as an extra last column,
+    /// so the key of the last row is always known; encoders only look at the
     /// selected columns.
     pub fn sql(&self) -> String {
+        let key = self.dataset.key_column().quoted();
         let mut names: Vec<String> = self.columns.columns().iter().map(|c| c.quoted()).collect();
-        if self.columns.position("id").is_none() {
-            names.push("\"id\"".to_owned());
+        if self.columns.position(self.dataset.key).is_none() {
+            names.push(key.clone());
         }
         format!(
-            "SELECT {} FROM {TABLE} WHERE \"id\" > $1 ORDER BY \"id\" LIMIT $2",
-            names.join(", ")
+            "SELECT {} FROM \"{}\" WHERE {key} > $1 ORDER BY {key} LIMIT $2",
+            names.join(", "),
+            self.dataset.relation
         )
     }
 
-    /// Index of `id` in rows returned by [`Self::sql`].
-    pub fn id_index(&self) -> usize {
-        self.columns.position("id").unwrap_or(self.columns.len())
+    /// Index of the key column in rows returned by [`Self::sql`].
+    pub fn key_index(&self) -> usize {
+        self.columns
+            .position(self.dataset.key)
+            .unwrap_or(self.columns.len())
     }
 }
 
@@ -210,7 +227,7 @@ impl BenchRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::COLUMNS;
+    use crate::schema::{DAILY_SALES_LIVE, ORDER_LINES, ORDERS};
 
     const MAX: u64 = 1_000_000;
 
@@ -226,9 +243,10 @@ mod tests {
     fn defaults_follow_the_design() {
         let request = data("").unwrap();
         assert_eq!(request.encoding, Encoding::Json);
+        assert_eq!(request.rows.dataset, &ORDERS);
         assert_eq!(request.rows.limit, 10_000);
-        assert_eq!(request.rows.after_id, 0);
-        assert_eq!(request.rows.columns.len(), COLUMNS.len());
+        assert_eq!(request.rows.after_key, 0);
+        assert_eq!(request.rows.columns.len(), ORDERS.columns.len());
         assert!(request.http_compression);
         assert!(!request.cache);
 
@@ -259,10 +277,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(request.rows.limit, 500);
-        assert_eq!(request.rows.after_id, 1000);
+        assert_eq!(request.rows.after_key, 1000);
         assert_eq!(
             request.rows.columns,
-            ColumnSelection::parse("total,id").unwrap()
+            ColumnSelection::parse(&ORDERS, "total,id").unwrap()
         );
         assert!(!request.http_compression);
         assert!(request.cache);
@@ -324,7 +342,7 @@ mod tests {
     #[test]
     fn offset_must_fit_a_bigint() {
         assert_eq!(
-            data("offset=9223372036854775807").unwrap().rows.after_id,
+            data("offset=9223372036854775807").unwrap().rows.after_key,
             i64::MAX
         );
         assert!(error("offset=9223372036854775808").contains("offset"));
@@ -344,6 +362,25 @@ mod tests {
     fn columns_are_whitelisted() {
         assert!(error("columns=id,password").contains("unknown column \"password\""));
         assert!(error("columns=id;DROP TABLE orders").contains("unknown column"));
+    }
+
+    #[test]
+    fn datasets_are_validated_and_choose_the_columns() {
+        assert!(
+            error("dataset=users")
+                .contains("unknown dataset \"users\" (expected one of: orders, order_lines")
+        );
+        let lines = data("dataset=ORDER_LINES&columns=brand,line_id").unwrap();
+        assert_eq!(lines.rows.dataset, &ORDER_LINES);
+        assert_eq!(lines.rows.columns.len(), 2);
+        assert!(
+            error("dataset=order_lines&columns=id")
+                .contains("unknown column \"id\" in dataset order_lines")
+        );
+        assert_eq!(
+            data("dataset=daily_sales").unwrap().rows.columns.len(),
+            DAILY_SALES_LIVE.columns.len()
+        );
     }
 
     #[test]
@@ -369,16 +406,24 @@ mod tests {
         let query = data("columns=total,country").unwrap().rows;
         assert_eq!(
             query.sql(),
-            "SELECT \"total\", \"country\", \"id\" FROM orders WHERE \"id\" > $1 ORDER BY \"id\" LIMIT $2"
+            "SELECT \"total\", \"country\", \"id\" FROM \"orders\" WHERE \"id\" > $1 ORDER BY \"id\" LIMIT $2"
         );
-        assert_eq!(query.id_index(), 2);
+        assert_eq!(query.key_index(), 2);
 
         let with_id = data("columns=country,id").unwrap().rows;
         assert_eq!(
             with_id.sql(),
-            "SELECT \"country\", \"id\" FROM orders WHERE \"id\" > $1 ORDER BY \"id\" LIMIT $2"
+            "SELECT \"country\", \"id\" FROM \"orders\" WHERE \"id\" > $1 ORDER BY \"id\" LIMIT $2"
         );
-        assert_eq!(with_id.id_index(), 1);
+        assert_eq!(with_id.key_index(), 1);
+
+        let lines = data("dataset=order_lines&columns=brand").unwrap().rows;
+        assert_eq!(
+            lines.sql(),
+            "SELECT \"brand\", \"line_id\" FROM \"order_line_details\" \
+             WHERE \"line_id\" > $1 ORDER BY \"line_id\" LIMIT $2"
+        );
+        assert_eq!(lines.key_index(), 1);
     }
 
     #[test]
@@ -394,5 +439,7 @@ mod tests {
         );
         let small = BenchRequest::parse(&Params::parse(""), 50_000).unwrap();
         assert_eq!(small.rows.limit, 50_000);
+        let lines = BenchRequest::parse(&Params::parse("dataset=order_lines"), MAX).unwrap();
+        assert_eq!(lines.rows.dataset, &ORDER_LINES);
     }
 }

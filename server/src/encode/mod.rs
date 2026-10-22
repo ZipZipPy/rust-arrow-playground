@@ -8,6 +8,8 @@ pub mod parquet;
 use std::fmt;
 use std::io::Write;
 use std::str::FromStr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use ::parquet::errors::ParquetError;
 use arrow::error::ArrowError;
@@ -154,8 +156,55 @@ pub enum ArrowContainer {
     File,
 }
 
+/// Set when the client went away. Long encodes check it between record
+/// batches (and `/api/bench` between variants) and stop early, so abandoned
+/// work does not pile up after a cancel.
+#[derive(Debug, Clone, Default)]
+pub struct CancelFlag(Arc<AtomicBool>);
+
+/// Returned by an encode that stopped because its [`CancelFlag`] was set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("cancelled: the client went away")]
+pub struct Cancelled;
+
+impl CancelFlag {
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+
+    pub fn check(&self) -> Result<(), Cancelled> {
+        if self.is_cancelled() {
+            Err(Cancelled)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// A guard that sets the flag when dropped, e.g. together with a
+    /// handler future that hyper drops on disconnect.
+    pub fn cancel_on_drop(&self) -> CancelOnDrop {
+        CancelOnDrop(self.clone())
+    }
+}
+
+/// Sets its [`CancelFlag`] when dropped.
+#[derive(Debug)]
+pub struct CancelOnDrop(CancelFlag);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum EncodeError {
+    #[error(transparent)]
+    Cancelled(#[from] Cancelled),
     #[error(transparent)]
     Convert(#[from] ConvertError),
     #[error("JSON encoding failed: {0}")]
@@ -164,6 +213,8 @@ pub enum EncodeError {
     Ipc(#[from] ArrowError),
     #[error("Parquet encoding failed: {0}")]
     Parquet(#[from] ParquetError),
+    #[error("HTTP compression failed: {0}")]
+    Compress(#[from] std::io::Error),
 }
 
 impl Encoding {
@@ -191,6 +242,23 @@ impl Encoding {
         }
     }
 
+    /// Whether the body is already compressed with a strong codec, so HTTP
+    /// compression would cost CPU for only 1-2% fewer bytes.
+    pub const fn is_strongly_compressed(&self) -> bool {
+        matches!(
+            self,
+            Self::Arrow {
+                compression: IpcCompression::Zstd,
+                ..
+            } | Self::Parquet {
+                compression: ParquetCompression::Zstd
+                    | ParquetCompression::Gzip
+                    | ParquetCompression::Brotli,
+                ..
+            }
+        )
+    }
+
     /// Every variant `/api/bench` measures: JSON, Arrow for each IPC
     /// compression with and without dictionaries, Parquet for each codec.
     pub fn bench_variants(batch_size: usize) -> Vec<Encoding> {
@@ -216,22 +284,24 @@ impl Encoding {
 
 /// Encodes `rows` (whose first `columns.len()` fields are `columns`) into an
 /// in-memory response body.
+///
+/// The output buffer is sized up front for JSON and Arrow IPC, since growing
+/// a large `Vec` copies it over and over and that would be timed as
+/// encoding. `ArrowWriter` buffers whole row groups itself, so Parquet does
+/// not need it.
 pub fn encode(
     rows: &[Row],
     columns: &[&'static Column],
     encoding: &Encoding,
+    cancel: &CancelFlag,
 ) -> Result<Vec<u8>, EncodeError> {
-    let capacity = match encoding {
-        // JSON is large and growing a huge Vec copies it repeatedly.
-        Encoding::Json => rows.len() * json::row_size_hint(columns),
-        _ => 0,
-    };
-    encode_to(
-        Vec::with_capacity(capacity),
+    encode_with(
         rows,
         columns,
         encoding,
         ArrowContainer::Stream,
+        cancel,
+        Vec::with_capacity,
     )
 }
 
@@ -242,18 +312,40 @@ pub fn encode_to<W: Write + Send>(
     columns: &[&'static Column],
     encoding: &Encoding,
     container: ArrowContainer,
+    cancel: &CancelFlag,
+) -> Result<W, EncodeError> {
+    encode_with(rows, columns, encoding, container, cancel, |_| out)
+}
+
+/// Encodes into the writer `out` makes from a size estimate in bytes.
+fn encode_with<W: Write + Send>(
+    rows: &[Row],
+    columns: &[&'static Column],
+    encoding: &Encoding,
+    container: ArrowContainer,
+    cancel: &CancelFlag,
+    out: impl FnOnce(usize) -> W,
 ) -> Result<W, EncodeError> {
     match *encoding {
-        Encoding::Json => Ok(json::write(out, rows, columns)?),
+        Encoding::Json => {
+            let out = out(rows.len() * json::row_size_hint(columns));
+            json::write(out, rows, columns, cancel)
+        }
         Encoding::Arrow {
             compression,
             dictionary,
             batch_size,
         } => {
-            let (schema, batches) = convert::record_batches(rows, columns, batch_size, dictionary)?;
+            let (schema, batches) =
+                convert::record_batches(rows, columns, batch_size, dictionary, cancel)?;
+            let out = out(ipc::size_hint(&batches));
             let out = match container {
-                ArrowContainer::Stream => ipc::write_stream(out, &schema, &batches, compression)?,
-                ArrowContainer::File => ipc::write_file(out, &schema, &batches, compression)?,
+                ArrowContainer::Stream => {
+                    ipc::write_stream(out, &schema, &batches, compression, cancel)?
+                }
+                ArrowContainer::File => {
+                    ipc::write_file(out, &schema, &batches, compression, cancel)?
+                }
             };
             Ok(out)
         }
@@ -262,14 +354,9 @@ pub fn encode_to<W: Write + Send>(
             batch_size,
         } => {
             // Parquet does its own dictionary encoding, so strings stay Utf8.
-            let (schema, batches) = convert::record_batches(rows, columns, batch_size, false)?;
-            Ok(parquet::write(
-                out,
-                schema,
-                &batches,
-                compression,
-                batch_size,
-            )?)
+            let (schema, batches) =
+                convert::record_batches(rows, columns, batch_size, false, cancel)?;
+            parquet::write(out(0), schema, &batches, compression, batch_size, cancel)
         }
     }
 }
@@ -298,6 +385,33 @@ mod tests {
             err.to_string(),
             "unknown format \"xml\" (expected one of: json, arrow, parquet)"
         );
+    }
+
+    #[test]
+    fn only_strong_codecs_skip_http_compression() {
+        let strong: Vec<String> = Encoding::bench_variants(1024)
+            .into_iter()
+            .filter(Encoding::is_strongly_compressed)
+            .map(|encoding| encoding.label())
+            .collect();
+        assert_eq!(
+            strong,
+            [
+                "arrow · zstd",
+                "arrow · zstd · dict",
+                "parquet · gzip",
+                "parquet · zstd",
+                "parquet · brotli"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_cancel_guard_sets_its_flag_when_dropped() {
+        let flag = CancelFlag::default();
+        assert_eq!(flag.check(), Ok(()));
+        drop(flag.cancel_on_drop());
+        assert_eq!(flag.check(), Err(Cancelled));
     }
 
     #[test]

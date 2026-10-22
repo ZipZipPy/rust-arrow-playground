@@ -8,13 +8,14 @@ import {
   formatTimes,
 } from '../../lib/format';
 import type { GlossaryKey } from '../../lib/glossary';
+import { USE_SCOPE_LABELS } from '../../lib/settings';
 import { type GroupSummary, ratio, speedup, summarizeByFormat } from '../../lib/stats';
 import type { Measurement } from '../../lib/types';
 import { type BarDatum, BarRows } from '../charts/BarRows';
 import { FORMAT_COLOR } from '../charts/meta';
 import { StackedBars } from '../charts/StackedBars';
 import { Term } from '../InfoTip';
-import { Card, ChartTitle, FormatTag } from './common';
+import { Card, ChartTitle, FormatTag, TableScroll } from './common';
 
 interface CompareCardProps {
   batch: readonly Measurement[];
@@ -42,7 +43,7 @@ const sizeVersus = (value: number | null, json: number | null) => {
 const PANELS: Panel[] = [
   { key: 'e2e', label: 'End to end (median)', term: 'endToEnd', value: (g) => g.endToEnd.median, format: formatMs, versus: timeVersus },
   { key: 'wire', label: 'Bytes on the wire', term: 'wire', value: (g) => g.wireBytes, format: formatBytes, versus: sizeVersus },
-  { key: 'decode', label: 'Client decode', term: 'decode', value: (g) => g.decodeMs, format: formatMs, versus: timeVersus },
+  { key: 'browser', label: 'Browser work (decode + use)', term: 'browser', value: (g) => g.browserMs, format: formatMs, versus: timeVersus },
   { key: 'payload', label: 'Payload to decode', term: 'payload', value: (g) => g.payloadBytes, format: formatBytes, versus: sizeVersus },
 ];
 
@@ -52,7 +53,7 @@ const order = (g: GroupSummary) => FORMAT_ORDER[g.format];
 function Headline({ group, json }: { group: GroupSummary; json: GroupSummary | undefined }) {
   const faster = json ? speedup(json.endToEnd.median, group.endToEnd.median) : null;
   const smaller = json ? ratio(group.wireBytes, json.wireBytes) : null;
-  const decode = json ? speedup(json.decodeMs, group.decodeMs) : null;
+  const browser = json ? speedup(json.browserMs, group.browserMs) : null;
   const isBaseline = group.format === 'json';
   return (
     <div className={`headline headline-${group.format}`}>
@@ -71,7 +72,7 @@ function Headline({ group, json }: { group: GroupSummary; json: GroupSummary | u
             <span className="headline-unit">{faster === null || faster >= 1 ? ' faster' : ' slower'}</span>
           </div>
           <div className="headline-detail">
-            {formatMs(group.endToEnd.median)} · {describeSizeRatio(smaller)} · decode {describeSpeedup(decode)}
+            {formatMs(group.endToEnd.median)} · {describeSizeRatio(smaller)} · browser work {describeSpeedup(browser)}
           </div>
         </>
       )}
@@ -92,8 +93,10 @@ export function CompareCard({ batch, running, ref }: CompareCardProps) {
       busy={running}
       subtitle={
         <>
-          {formatInt(first.rowCount)} rows × {first.columnCount} columns · {rounds === 1 ? '1 round' : `median of ${rounds} rounds`},
-          interleaved · HTTP {first.httpCompression ? 'compression on' : 'compression off'}
+          <strong>{first.dataset}</strong> · {formatInt(first.rowCount)} rows × {first.columnCount} columns ·{' '}
+          {rounds === 1 ? '1 round' : `median of ${rounds} rounds`}, interleaved · HTTP compression{' '}
+          {first.httpCompression ? 'on' : 'off'}
+          {first.rowCache && ' · row cache on'} · touch {USE_SCOPE_LABELS[first.useScope].toLowerCase()}
           {running && ' · running…'}
         </>
       }
@@ -141,7 +144,7 @@ export function CompareCard({ batch, running, ref }: CompareCardProps) {
         />
       </div>
 
-      <div className="table-scroll">
+      <TableScroll label="Comparison per format">
         <table className="data-table">
           <thead>
             <tr>
@@ -154,6 +157,7 @@ export function CompareCard({ batch, running, ref }: CompareCardProps) {
               <th scope="col" className="num"><Term term="wire">Wire</Term></th>
               <th scope="col" className="num"><Term term="sizeRatio">Size vs JSON</Term></th>
               <th scope="col" className="num"><Term term="decode">Decode</Term></th>
+              <th scope="col" className="num"><Term term="use">Use</Term></th>
               <th scope="col" className="num"><Term term="payload">Payload</Term></th>
             </tr>
           </thead>
@@ -171,12 +175,13 @@ export function CompareCard({ batch, running, ref }: CompareCardProps) {
                 <td className="num">{formatBytes(g.wireBytes)}</td>
                 <td className="num">{json ? formatTimes(ratio(g.wireBytes, json.wireBytes)) : '–'}</td>
                 <td className="num">{formatMs(g.decodeMs)}</td>
+                <td className="num">{formatMs(g.useMs)}</td>
                 <td className="num">{formatBytes(g.payloadBytes)}</td>
               </tr>
             ))}
           </tbody>
         </table>
-      </div>
+      </TableScroll>
     </Card>
   );
 }

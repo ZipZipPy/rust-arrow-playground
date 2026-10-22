@@ -67,3 +67,16 @@ export function ChartTitle({ children, term, label }: { children?: ReactNode; te
     </h3>
   );
 }
+
+/**
+ * A horizontally scrollable table box. It is focusable and labelled so a
+ * keyboard can scroll it in every browser (Safari does not focus scrollers
+ * on its own).
+ */
+export function TableScroll({ label, className, children }: { label: string; className?: string; children: ReactNode }) {
+  return (
+    <div className={`table-scroll ${className ?? ''}`} role="region" aria-label={label} tabIndex={0}>
+      {children}
+    </div>
+  );
+}

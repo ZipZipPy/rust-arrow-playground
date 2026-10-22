@@ -1,3 +1,4 @@
+import { USE_SCOPE_LABELS } from './settings';
 import type { Measurement } from './types';
 
 interface ExportColumn {
@@ -10,6 +11,7 @@ const round3 = (v: number | null) => (v === null ? null : Math.round(v * 1000) /
 const COLUMNS: ExportColumn[] = [
   { header: 'time', value: (m) => m.at },
   { header: 'target', value: (m) => m.target },
+  { header: 'dataset', value: (m) => m.dataset },
   { header: 'kind', value: (m) => m.kind },
   { header: 'variant', value: (m) => m.variant },
   { header: 'rows', value: (m) => m.rowCount },
@@ -20,6 +22,7 @@ const COLUMNS: ExportColumn[] = [
   { header: 'end_to_end_ms', value: (m) => round3(m.endToEndMs) },
   { header: 'db_ms', value: (m) => round3(m.dbMs) },
   { header: 'encode_ms', value: (m) => round3(m.encodeMs) },
+  { header: 'compress_ms', value: (m) => round3(m.compressMs) },
   { header: 'server_total_ms', value: (m) => round3(m.serverTotalMs) },
   { header: 'ttfb_ms', value: (m) => round3(m.ttfbMs) },
   { header: 'network_wait_ms', value: (m) => round3(m.networkWaitMs) },
@@ -28,6 +31,7 @@ const COLUMNS: ExportColumn[] = [
   { header: 'use_ms', value: (m) => round3(m.useMs) },
   { header: 'wire_bytes', value: (m) => m.wireBytes },
   { header: 'payload_bytes', value: (m) => m.payloadBytes },
+  { header: 'touch_data', value: (m) => USE_SCOPE_LABELS[m.useScope] },
   { header: 'timing_source', value: (m) => m.timingSource },
 ];
 

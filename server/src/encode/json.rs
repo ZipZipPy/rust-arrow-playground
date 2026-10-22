@@ -10,17 +10,30 @@ use serde::ser::{Error as _, SerializeMap, SerializeSeq};
 use serde::{Serialize, Serializer};
 use tokio_postgres::Row;
 
+use super::{CancelFlag, Cancelled, EncodeError};
 use crate::pg_time::{DATE_LEN, Date, RFC3339_LEN, Timestamp};
 use crate::schema::{Column, ColumnType};
+
+/// Rows serialized between two looks at the cancellation flag.
+const CANCEL_CHECK_ROWS: usize = 16_384;
 
 /// Serializes `rows` as `[{"col": value, ...}, ...]` into `out`.
 pub fn write<W: Write>(
     mut out: W,
     rows: &[Row],
     columns: &[&'static Column],
-) -> serde_json::Result<W> {
-    serde_json::to_writer(&mut out, &JsonRows { rows, columns })?;
-    Ok(out)
+    cancel: &CancelFlag,
+) -> Result<W, EncodeError> {
+    let json = JsonRows {
+        rows,
+        columns,
+        cancel,
+    };
+    match serde_json::to_writer(&mut out, &json) {
+        Ok(()) => Ok(out),
+        Err(_) if cancel.is_cancelled() => Err(Cancelled.into()),
+        Err(err) => Err(err.into()),
+    }
 }
 
 /// Approximate encoded size of one row, for pre-sizing buffers.
@@ -36,12 +49,16 @@ pub fn row_size_hint(columns: &[&Column]) -> usize {
 struct JsonRows<'a> {
     rows: &'a [Row],
     columns: &'a [&'static Column],
+    cancel: &'a CancelFlag,
 }
 
 impl Serialize for JsonRows<'_> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let mut seq = serializer.serialize_seq(Some(self.rows.len()))?;
-        for row in self.rows {
+        for (i, row) in self.rows.iter().enumerate() {
+            if i % CANCEL_CHECK_ROWS == 0 {
+                self.cancel.check().map_err(S::Error::custom)?;
+            }
             seq.serialize_element(&JsonRow {
                 row,
                 columns: self.columns,

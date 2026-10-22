@@ -4,10 +4,11 @@ import { ratio } from '../../lib/stats';
 import type { BenchReport } from '../../lib/types';
 import { FORMAT_COLOR } from '../charts/meta';
 import { Term } from '../InfoTip';
-import { Card, FormatTag } from './common';
+import { Card, FormatTag, TableScroll } from './common';
 
 interface BenchCardProps {
   report: BenchReport;
+  dataset: string;
   ref?: Ref<HTMLElement>;
 }
 
@@ -24,7 +25,7 @@ function CellBar({ value, max, color, label }: { value: number; max: number; col
 }
 
 /** Server-side encoding of every variant from the same rows: no network, no browser. */
-export function BenchCard({ report, ref }: BenchCardProps) {
+export function BenchCard({ report, dataset, ref }: BenchCardProps) {
   const maxMs = Math.max(...report.results.map((r) => r.encode_ms));
   const maxBytes = Math.max(...report.results.map((r) => r.bytes));
   const jsonBytes = report.results.find((r) => r.format === 'json')?.bytes ?? null;
@@ -37,13 +38,14 @@ export function BenchCard({ report, ref }: BenchCardProps) {
       title="Server benchmark"
       subtitle={
         <>
-          {formatInt(report.rows)} rows × {report.columns} columns fetched once in {formatMs(report.db_ms)}, then encoded every
+          {formatInt(report.rows)} rows × {report.columns} columns of <strong>{dataset}</strong> fetched once in{' '}
+          {formatMs(report.db_ms)}, then encoded every
           way on the server. No network involved. Fastest: <strong>{fastest.variant}</strong>; smallest:{' '}
           <strong>{smallest.variant}</strong>.
         </>
       }
     >
-      <div className="table-scroll">
+      <TableScroll label="Encode time and size per variant">
         <table className="data-table bench-table">
           <thead>
             <tr>
@@ -76,7 +78,7 @@ export function BenchCard({ report, ref }: BenchCardProps) {
             ))}
           </tbody>
         </table>
-      </div>
+      </TableScroll>
     </Card>
   );
 }

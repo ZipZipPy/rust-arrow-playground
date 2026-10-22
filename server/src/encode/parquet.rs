@@ -6,10 +6,9 @@ use arrow::datatypes::SchemaRef;
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::{BrotliLevel, Compression, GzipLevel, ZstdLevel};
-use parquet::errors::ParquetError;
 use parquet::file::properties::WriterProperties;
 
-use super::ParquetCompression;
+use super::{CancelFlag, EncodeError, ParquetCompression};
 
 /// Writes `batches` as one Parquet file with row groups of at most
 /// `row_group_size` rows.
@@ -19,17 +18,19 @@ pub fn write<W: Write + Send>(
     batches: &[RecordBatch],
     compression: ParquetCompression,
     row_group_size: usize,
-) -> Result<W, ParquetError> {
+    cancel: &CancelFlag,
+) -> Result<W, EncodeError> {
     let properties = WriterProperties::builder()
         .set_compression(codec(compression))
         .set_max_row_group_row_count(Some(row_group_size))
         .build();
     let mut writer = ArrowWriter::try_new(out, schema, Some(properties))?;
     for batch in batches {
+        cancel.check()?;
         writer.write(batch)?;
     }
     // Flushes the last row group and writes the footer.
-    writer.into_inner()
+    Ok(writer.into_inner()?)
 }
 
 /// Codecs at their library default levels.

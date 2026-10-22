@@ -40,7 +40,7 @@ services:
       # and refuse a volume at /var/lib/postgresql/data.
       - pgdata:/var/lib/postgresql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d playground"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d playground"]
       interval: 2s
       timeout: 3s
       retries: 30

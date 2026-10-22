@@ -9,9 +9,16 @@ use serde::Serialize;
 use crate::db;
 use crate::encode::Format;
 use crate::query::BATCH_SIZE_RANGE;
+use crate::schema::Dataset;
 
 fn database_config(value: &str) -> Result<tokio_postgres::Config, String> {
     db::parse_config(value).map_err(|err| format!("invalid database URL: {err}"))
+}
+
+fn dataset(value: &str) -> Result<&'static Dataset, String> {
+    value
+        .parse()
+        .map_err(|err: crate::schema::UnknownDataset| err.to_string())
 }
 
 fn batch_size(value: &str) -> Result<usize, String> {
@@ -60,16 +67,16 @@ pub struct ServeConfig {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum SeedMode {
-    /// Drop and recreate the table.
+    /// Drop and recreate every relation.
     Replace,
-    /// Add rows after max(id).
+    /// Add orders (and their lines) after max(id).
     Append,
 }
 
 /// `playground seed`
 #[derive(Debug, Clone, Args)]
 pub struct SeedConfig {
-    /// Rows to generate.
+    /// Orders to generate (order lines are about 2.5 times this).
     #[arg(long, env = "SEED_ROWS", default_value_t = 1_000_000)]
     pub rows: u64,
 
@@ -77,14 +84,15 @@ pub struct SeedConfig {
     #[arg(long, env = "SEED_WORKERS", default_value_t = 4, value_parser = clap::value_parser!(u16).range(1..=256))]
     pub workers: u16,
 
-    /// Rows per COPY chunk.
+    /// Orders per COPY chunk.
     #[arg(long, env = "SEED_BATCH_SIZE", default_value_t = 50_000, value_parser = clap::value_parser!(u64).range(1..))]
     pub batch_size: u64,
 
     #[arg(long, env = "SEED_MODE", value_enum, default_value_t = SeedMode::Replace)]
     pub mode: SeedMode,
 
-    /// Do nothing if the table already has rows.
+    /// Do nothing if a complete seed of the current schema version exists;
+    /// otherwise (none, interrupted, older schema) replace everything.
     #[arg(long, env = "SEED_IF_EMPTY", action = ArgAction::SetTrue, value_parser = BoolishValueParser::new())]
     pub if_empty: bool,
 
@@ -107,10 +115,14 @@ pub struct ExportConfig {
     #[arg(long)]
     pub out: PathBuf,
 
+    /// orders, order_lines, daily_sales or daily_sales_live.
+    #[arg(long, default_value = "orders", value_parser = dataset)]
+    pub dataset: &'static Dataset,
+
     #[arg(long, default_value_t = crate::query::DEFAULT_ROWS, value_parser = clap::value_parser!(u64).range(1..))]
     pub rows: u64,
 
-    /// Export rows with id > OFFSET.
+    /// Export rows whose key column (id, line_id) is greater than OFFSET.
     #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u64).range(0..=i64::MAX as u64))]
     pub offset: u64,
 

@@ -1,28 +1,41 @@
 //! Reference data for the mock orders: names, countries with real city
 //! coordinates, categories with products and base prices.
 
+#[derive(Debug, PartialEq)]
 pub struct Country {
     /// ISO 3166-1 alpha-2.
     pub code: &'static str,
+    pub name: &'static str,
+    pub region: &'static str,
+    /// ISO 4217.
+    pub currency: &'static str,
+    /// Standard VAT / GST rate (0 for the US, which has state sales taxes).
+    pub vat_rate: f32,
     /// Relative share of customers.
     pub weight: u32,
     /// Largest city first; earlier cities get more customers.
     pub cities: &'static [City],
 }
 
+#[derive(Debug, PartialEq)]
 pub struct City {
     pub name: &'static str,
     pub latitude: f64,
     pub longitude: f64,
 }
 
+#[derive(Debug, PartialEq)]
 pub struct Category {
     pub name: &'static str,
+    pub department: &'static str,
     /// Relative share of orders.
     pub weight: u32,
+    /// Shipping weight range of its products, in kg.
+    pub weight_kg: (f32, f32),
     pub products: &'static [Product],
 }
 
+#[derive(Debug, PartialEq)]
 pub struct Product {
     pub name: &'static str,
     pub base_price: f64,
@@ -43,6 +56,10 @@ const fn product(name: &'static str, base_price: f64) -> Product {
 pub static COUNTRIES: &[Country] = &[
     Country {
         code: "US",
+        name: "United States",
+        region: "North America",
+        currency: "USD",
+        vat_rate: 0.0,
         weight: 24,
         cities: &[
             city("New York", 40.7128, -74.0060),
@@ -59,6 +76,10 @@ pub static COUNTRIES: &[Country] = &[
     },
     Country {
         code: "GB",
+        name: "United Kingdom",
+        region: "Europe",
+        currency: "GBP",
+        vat_rate: 0.20,
         weight: 8,
         cities: &[
             city("London", 51.5074, -0.1278),
@@ -73,6 +94,10 @@ pub static COUNTRIES: &[Country] = &[
     },
     Country {
         code: "DE",
+        name: "Germany",
+        region: "Europe",
+        currency: "EUR",
+        vat_rate: 0.19,
         weight: 8,
         cities: &[
             city("Berlin", 52.5200, 13.4050),
@@ -87,6 +112,10 @@ pub static COUNTRIES: &[Country] = &[
     },
     Country {
         code: "FR",
+        name: "France",
+        region: "Europe",
+        currency: "EUR",
+        vat_rate: 0.20,
         weight: 7,
         cities: &[
             city("Paris", 48.8566, 2.3522),
@@ -101,6 +130,10 @@ pub static COUNTRIES: &[Country] = &[
     },
     Country {
         code: "JP",
+        name: "Japan",
+        region: "Asia Pacific",
+        currency: "JPY",
+        vat_rate: 0.10,
         weight: 7,
         cities: &[
             city("Tokyo", 35.6762, 139.6503),
@@ -115,6 +148,10 @@ pub static COUNTRIES: &[Country] = &[
     },
     Country {
         code: "CA",
+        name: "Canada",
+        region: "North America",
+        currency: "CAD",
+        vat_rate: 0.05,
         weight: 5,
         cities: &[
             city("Toronto", 43.6532, -79.3832),
@@ -127,6 +164,10 @@ pub static COUNTRIES: &[Country] = &[
     },
     Country {
         code: "AU",
+        name: "Australia",
+        region: "Asia Pacific",
+        currency: "AUD",
+        vat_rate: 0.10,
         weight: 4,
         cities: &[
             city("Sydney", -33.8688, 151.2093),
@@ -138,6 +179,10 @@ pub static COUNTRIES: &[Country] = &[
     },
     Country {
         code: "BR",
+        name: "Brazil",
+        region: "Latin America",
+        currency: "BRL",
+        vat_rate: 0.17,
         weight: 4,
         cities: &[
             city("São Paulo", -23.5505, -46.6333),
@@ -150,6 +195,10 @@ pub static COUNTRIES: &[Country] = &[
     },
     Country {
         code: "IN",
+        name: "India",
+        region: "Asia Pacific",
+        currency: "INR",
+        vat_rate: 0.18,
         weight: 6,
         cities: &[
             city("Mumbai", 19.0760, 72.8777),
@@ -164,6 +213,10 @@ pub static COUNTRIES: &[Country] = &[
     },
     Country {
         code: "CN",
+        name: "China",
+        region: "Asia Pacific",
+        currency: "CNY",
+        vat_rate: 0.13,
         weight: 5,
         cities: &[
             city("Shanghai", 31.2304, 121.4737),
@@ -177,6 +230,10 @@ pub static COUNTRIES: &[Country] = &[
     },
     Country {
         code: "KR",
+        name: "South Korea",
+        region: "Asia Pacific",
+        currency: "KRW",
+        vat_rate: 0.10,
         weight: 3,
         cities: &[
             city("Seoul", 37.5665, 126.9780),
@@ -187,6 +244,10 @@ pub static COUNTRIES: &[Country] = &[
     },
     Country {
         code: "TH",
+        name: "Thailand",
+        region: "Asia Pacific",
+        currency: "THB",
+        vat_rate: 0.07,
         weight: 3,
         cities: &[
             city("Bangkok", 13.7563, 100.5018),
@@ -199,6 +260,10 @@ pub static COUNTRIES: &[Country] = &[
     },
     Country {
         code: "NL",
+        name: "Netherlands",
+        region: "Europe",
+        currency: "EUR",
+        vat_rate: 0.21,
         weight: 3,
         cities: &[
             city("Amsterdam", 52.3676, 4.9041),
@@ -210,6 +275,10 @@ pub static COUNTRIES: &[Country] = &[
     },
     Country {
         code: "ES",
+        name: "Spain",
+        region: "Europe",
+        currency: "EUR",
+        vat_rate: 0.21,
         weight: 4,
         cities: &[
             city("Madrid", 40.4168, -3.7038),
@@ -222,6 +291,10 @@ pub static COUNTRIES: &[Country] = &[
     },
     Country {
         code: "IT",
+        name: "Italy",
+        region: "Europe",
+        currency: "EUR",
+        vat_rate: 0.22,
         weight: 4,
         cities: &[
             city("Rome", 41.9028, 12.4964),
@@ -234,6 +307,10 @@ pub static COUNTRIES: &[Country] = &[
     },
     Country {
         code: "MX",
+        name: "Mexico",
+        region: "Latin America",
+        currency: "MXN",
+        vat_rate: 0.16,
         weight: 3,
         cities: &[
             city("Mexico City", 19.4326, -99.1332),
@@ -245,6 +322,10 @@ pub static COUNTRIES: &[Country] = &[
     },
     Country {
         code: "SE",
+        name: "Sweden",
+        region: "Europe",
+        currency: "SEK",
+        vat_rate: 0.25,
         weight: 2,
         cities: &[
             city("Stockholm", 59.3293, 18.0686),
@@ -255,6 +336,10 @@ pub static COUNTRIES: &[Country] = &[
     },
     Country {
         code: "PL",
+        name: "Poland",
+        region: "Europe",
+        currency: "PLN",
+        vat_rate: 0.23,
         weight: 2,
         cities: &[
             city("Warsaw", 52.2297, 21.0122),
@@ -266,6 +351,10 @@ pub static COUNTRIES: &[Country] = &[
     },
     Country {
         code: "ZA",
+        name: "South Africa",
+        region: "Middle East & Africa",
+        currency: "ZAR",
+        vat_rate: 0.15,
         weight: 2,
         cities: &[
             city("Johannesburg", -26.2041, 28.0473),
@@ -276,6 +365,10 @@ pub static COUNTRIES: &[Country] = &[
     },
     Country {
         code: "NG",
+        name: "Nigeria",
+        region: "Middle East & Africa",
+        currency: "NGN",
+        vat_rate: 0.075,
         weight: 2,
         cities: &[
             city("Lagos", 6.5244, 3.3792),
@@ -286,6 +379,10 @@ pub static COUNTRIES: &[Country] = &[
     },
     Country {
         code: "AR",
+        name: "Argentina",
+        region: "Latin America",
+        currency: "ARS",
+        vat_rate: 0.21,
         weight: 2,
         cities: &[
             city("Buenos Aires", -34.6037, -58.3816),
@@ -296,6 +393,10 @@ pub static COUNTRIES: &[Country] = &[
     },
     Country {
         code: "ID",
+        name: "Indonesia",
+        region: "Asia Pacific",
+        currency: "IDR",
+        vat_rate: 0.12,
         weight: 3,
         cities: &[
             city("Jakarta", -6.2088, 106.8456),
@@ -307,6 +408,10 @@ pub static COUNTRIES: &[Country] = &[
     },
     Country {
         code: "VN",
+        name: "Vietnam",
+        region: "Asia Pacific",
+        currency: "VND",
+        vat_rate: 0.10,
         weight: 2,
         cities: &[
             city("Ho Chi Minh City", 10.8231, 106.6297),
@@ -317,6 +422,10 @@ pub static COUNTRIES: &[Country] = &[
     },
     Country {
         code: "TR",
+        name: "Türkiye",
+        region: "Middle East & Africa",
+        currency: "TRY",
+        vat_rate: 0.20,
         weight: 2,
         cities: &[
             city("Istanbul", 41.0082, 28.9784),
@@ -327,6 +436,10 @@ pub static COUNTRIES: &[Country] = &[
     },
     Country {
         code: "CH",
+        name: "Switzerland",
+        region: "Europe",
+        currency: "CHF",
+        vat_rate: 0.081,
         weight: 2,
         cities: &[
             city("Zurich", 47.3769, 8.5417),
@@ -338,6 +451,10 @@ pub static COUNTRIES: &[Country] = &[
     },
     Country {
         code: "IE",
+        name: "Ireland",
+        region: "Europe",
+        currency: "EUR",
+        vat_rate: 0.23,
         weight: 1,
         cities: &[
             city("Dublin", 53.3498, -6.2603),
@@ -348,6 +465,10 @@ pub static COUNTRIES: &[Country] = &[
     },
     Country {
         code: "NZ",
+        name: "New Zealand",
+        region: "Asia Pacific",
+        currency: "NZD",
+        vat_rate: 0.15,
         weight: 1,
         cities: &[
             city("Auckland", -36.8485, 174.7633),
@@ -361,7 +482,9 @@ pub static COUNTRIES: &[Country] = &[
 pub static CATEGORIES: &[Category] = &[
     Category {
         name: "Electronics",
+        department: "Technology",
         weight: 18,
+        weight_kg: (0.1, 3.5),
         products: &[
             product("Wireless Earbuds", 79.99),
             product("Bluetooth Speaker", 49.99),
@@ -381,7 +504,9 @@ pub static CATEGORIES: &[Category] = &[
     },
     Category {
         name: "Books",
+        department: "Media",
         weight: 10,
+        weight_kg: (0.2, 1.6),
         products: &[
             product("Mystery Novel", 14.99),
             product("Science Fiction Paperback", 12.99),
@@ -397,7 +522,9 @@ pub static CATEGORIES: &[Category] = &[
     },
     Category {
         name: "Home & Kitchen",
+        department: "Home",
         weight: 12,
+        weight_kg: (0.3, 6.0),
         products: &[
             product("Chef's Knife", 59.99),
             product("Nonstick Frying Pan", 34.99),
@@ -415,7 +542,9 @@ pub static CATEGORIES: &[Category] = &[
     },
     Category {
         name: "Clothing",
+        department: "Fashion",
         weight: 14,
+        weight_kg: (0.1, 2.0),
         products: &[
             product("Cotton T-Shirt", 19.99),
             product("Slim Jeans", 59.99),
@@ -433,7 +562,9 @@ pub static CATEGORIES: &[Category] = &[
     },
     Category {
         name: "Sports & Outdoors",
+        department: "Leisure",
         weight: 8,
+        weight_kg: (0.2, 12.0),
         products: &[
             product("Yoga Mat", 29.99),
             product("Dumbbell Set", 89.99),
@@ -449,7 +580,9 @@ pub static CATEGORIES: &[Category] = &[
     },
     Category {
         name: "Toys & Games",
+        department: "Leisure",
         weight: 7,
+        weight_kg: (0.1, 4.0),
         products: &[
             product("Building Blocks Set", 49.99),
             product("Board Game", 34.99),
@@ -465,7 +598,9 @@ pub static CATEGORIES: &[Category] = &[
     },
     Category {
         name: "Beauty",
+        department: "Personal Care",
         weight: 7,
+        weight_kg: (0.05, 0.9),
         products: &[
             product("Face Moisturizer", 24.99),
             product("Sunscreen SPF 50", 16.99),
@@ -480,7 +615,9 @@ pub static CATEGORIES: &[Category] = &[
     },
     Category {
         name: "Grocery",
+        department: "Food",
         weight: 9,
+        weight_kg: (0.1, 5.0),
         products: &[
             product("Ground Coffee", 12.99),
             product("Green Tea", 8.99),
@@ -498,7 +635,9 @@ pub static CATEGORIES: &[Category] = &[
     },
     Category {
         name: "Garden",
+        department: "Home",
         weight: 4,
+        weight_kg: (0.2, 25.0),
         products: &[
             product("Garden Hose", 34.99),
             product("Pruning Shears", 22.99),
@@ -512,7 +651,9 @@ pub static CATEGORIES: &[Category] = &[
     },
     Category {
         name: "Automotive",
+        department: "Automotive",
         weight: 4,
+        weight_kg: (0.2, 8.0),
         products: &[
             product("Car Phone Mount", 19.99),
             product("Dash Cam", 89.99),
@@ -526,7 +667,9 @@ pub static CATEGORIES: &[Category] = &[
     },
     Category {
         name: "Office Supplies",
+        department: "Business",
         weight: 4,
+        weight_kg: (0.05, 15.0),
         products: &[
             product("Notebook", 6.99),
             product("Gel Pens", 9.99),
@@ -541,7 +684,9 @@ pub static CATEGORIES: &[Category] = &[
     },
     Category {
         name: "Pet Supplies",
+        department: "Pets",
         weight: 5,
+        weight_kg: (0.1, 15.0),
         products: &[
             product("Dog Food 15kg", 54.99),
             product("Cat Litter", 18.99),
@@ -632,6 +777,104 @@ pub static FIRST_NAMES: &[&str] = &[
     "Layla",
     "Ivan",
     "Olga",
+    "Aiko",
+    "Akira",
+    "Alejandro",
+    "Ali",
+    "Amir",
+    "Andrea",
+    "Ángel",
+    "Anika",
+    "Anja",
+    "Antoine",
+    "Ayesha",
+    "Bao",
+    "Beatriz",
+    "Camille",
+    "Carlos",
+    "Chen",
+    "Chiara",
+    "Daniel",
+    "Dawit",
+    "Divya",
+    "Dmitri",
+    "Eduardo",
+    "Elena",
+    "Emeka",
+    "Emil",
+    "Erik",
+    "Esther",
+    "Fernando",
+    "Finn",
+    "Gabriel",
+    "Giulia",
+    "Hamza",
+    "Hana",
+    "Hiroshi",
+    "Ines",
+    "Isabel",
+    "Jakub",
+    "Javier",
+    "Jin",
+    "Joon-ho",
+    "Julia",
+    "Kai",
+    "Kalani",
+    "Karin",
+    "Kenji",
+    "Kofi",
+    "Lars",
+    "Laura",
+    "Leila",
+    "Lena",
+    "Luca",
+    "Luis",
+    "Maja",
+    "Manon",
+    "Marco",
+    "María",
+    "Mariam",
+    "Mateus",
+    "Maya",
+    "Mohammed",
+    "Nadia",
+    "Naledi",
+    "Nikolai",
+    "Nina",
+    "Noor",
+    "Oscar",
+    "Pablo",
+    "Paula",
+    "Pedro",
+    "Pooja",
+    "Rafael",
+    "Rahul",
+    "Rania",
+    "Rosa",
+    "Rui",
+    "Sami",
+    "Samuel",
+    "Sara",
+    "Sebastián",
+    "Siddharth",
+    "Sipho",
+    "Sven",
+    "Tariq",
+    "Thabo",
+    "Thanh",
+    "Tomás",
+    "Uma",
+    "Victor",
+    "Wanjiru",
+    "Xin",
+    "Yara",
+    "Yusuf",
+    "Zara",
+    "Chayton",
+    "Kanya",
+    "Pim",
+    "Arthit",
+    "Ploy",
 ];
 
 pub static LAST_NAMES: &[&str] = &[
@@ -719,6 +962,108 @@ pub static LAST_NAMES: &[&str] = &[
     "Nguyen",
     "Tran",
     "Pham",
+    "Abe",
+    "Agarwal",
+    "Ahmed",
+    "Akhtar",
+    "Alves",
+    "Bakker",
+    "Banerjee",
+    "Barbosa",
+    "Becker",
+    "Bergström",
+    "Bose",
+    "Carvalho",
+    "Castro",
+    "Costa",
+    "Dang",
+    "De Jong",
+    "Demir",
+    "Dlamini",
+    "Do",
+    "Eriksson",
+    "Esposito",
+    "Ferrari",
+    "Fontaine",
+    "Gómez",
+    "Gupta",
+    "Hansen",
+    "Hashimoto",
+    "Hernández",
+    "Hoang",
+    "Huang",
+    "Ito",
+    "Jansen",
+    "Jensen",
+    "Kato",
+    "Khan",
+    "Klein",
+    "Kobayashi",
+    "Koch",
+    "Kowalczyk",
+    "Kruger",
+    "Larsen",
+    "Lefebvre",
+    "Lewandowski",
+    "Lim",
+    "Lin",
+    "Lindqvist",
+    "Lombardi",
+    "Lund",
+    "Mahlangu",
+    "Mendes",
+    "Mishra",
+    "Molina",
+    "Moreau",
+    "Morales",
+    "Mori",
+    "Nakamura",
+    "Ndlovu",
+    "Nkosi",
+    "Novák",
+    "Nunes",
+    "Obi",
+    "Okonkwo",
+    "Olsen",
+    "Ortiz",
+    "Öztürk",
+    "Petersen",
+    "Petrov",
+    "Pereira",
+    "Popescu",
+    "Ramírez",
+    "Rao",
+    "Reddy",
+    "Ricci",
+    "Romano",
+    "Sánchez",
+    "Schulz",
+    "Shah",
+    "Sim",
+    "Sokolov",
+    "Sousa",
+    "Tan",
+    "Teo",
+    "Torres",
+    "Uchenna",
+    "Vargas",
+    "Vasquez",
+    "Vu",
+    "Wagner",
+    "Watanabe",
+    "Weber",
+    "Wójcik",
+    "Wu",
+    "Xu",
+    "Yamamoto",
+    "Yang",
+    "Yeo",
+    "Yildiz",
+    "Zhao",
+    "Zhou",
+    "Chaiyaporn",
+    "Rattanakul",
+    "Suksawat",
 ];
 
 pub static EMAIL_DOMAINS: &[&str] = &["example.com", "example.org", "example.net"];
@@ -749,29 +1094,79 @@ pub static HOUR_WEIGHTS: [u32; 24] = [
     2, 1, 1, 1, 1, 2, 3, 5, 7, 8, 9, 10, 11, 10, 9, 9, 10, 11, 12, 12, 11, 9, 6, 4,
 ];
 
-pub static NOTES: &[&str] = &[
-    "Please leave the parcel at the front door.",
-    "Gift wrap, please.",
-    "Call before delivery.",
-    "Deliver after 5 pm.",
-    "Fragile: handle with care.",
-    "Leave with the neighbour if nobody is home.",
-    "Birthday present, no invoice in the box please.",
-    "Ring the bell twice.",
-    "The buzzer is broken, please call.",
-    "Customer requested express shipping.",
-    "Second attempt, previous delivery failed.",
-    "Replacement for a damaged item.",
-    "Please use recyclable packaging.",
-    "Deliver to the reception desk.",
-    "Include a gift card with the message \"Happy anniversary!\"",
-    "Combine with the customer's previous order.",
-    "Weekend delivery preferred.",
-    "Leave in the parcel locker.",
-    "Contact customer about a size exchange.",
-    "Apply loyalty discount on the next order.",
-    "Address updated by customer support.",
-    "Customer prefers SMS notifications.",
-    "Do not bend.",
-    "Back entrance, second floor.",
+/// Parts of the delivery notes, which are templates with variable parts
+/// (see `Generator::note`) so the column does not repeat a handful of
+/// sentences.
+pub static NOTE_PLACES: &[&str] = &[
+    "at the front door",
+    "in the garage",
+    "behind the side gate",
+    "at the reception desk",
+    "in the parcel locker",
+    "on the porch",
+    "by the back door",
+    "with the concierge",
+    "in the mailroom",
+    "under the carport",
 ];
+
+pub static NOTE_OCCASIONS: &[&str] = &[
+    "birthday",
+    "anniversary",
+    "graduation",
+    "wedding",
+    "retirement",
+    "housewarming",
+    "farewell party",
+    "new job",
+];
+
+pub static NOTE_CHANNELS: &[&str] = &["SMS", "email", "WhatsApp", "LINE", "a phone call"];
+
+pub static WEEKDAYS: &[&str] = &[
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+    "Sunday",
+];
+
+pub static SIZES: &[&str] = &[
+    "XS", "S", "M", "L", "XL", "XXL", "38", "40", "42", "44", "46",
+];
+
+/// Fictional brands, assigned to products.
+pub static BRANDS: &[&str] = &[
+    "Aurora",
+    "Brightline",
+    "Cobalt",
+    "Driftwood",
+    "Evergreen",
+    "Foxglove",
+    "Granite",
+    "Harbor",
+    "Ironbark",
+    "Juniper",
+    "Kestrel",
+    "Lumen",
+    "Meridian",
+    "Nimbus",
+    "Orchard",
+    "Pinnacle",
+    "Quarry",
+    "Redwood",
+    "Summit",
+    "Tidewater",
+    "Umber",
+    "Vantage",
+    "Willow",
+    "Zephyr",
+];
+
+/// (segment, weight): consumer ~80%, business ~15%, vip ~5%.
+pub static SEGMENTS: &[(&str, u32)] = &[("consumer", 80), ("business", 15), ("vip", 5)];
+
+/// Lines per order, 1..=5, averaging 2.5.
+pub static LINE_COUNT_WEIGHTS: [u32; 5] = [30, 25, 20, 15, 10];

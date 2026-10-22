@@ -15,7 +15,6 @@ import { useRunner } from './hooks/useRunner';
 import { useServerInfo } from './hooks/useServerInfo';
 import { useTheme } from './hooks/useTheme';
 import { fetchBench, normalizeBaseUrl, targetLabel } from './lib/api';
-import { pickUseColumn } from './lib/decode';
 import { parseHistory, prependHistory } from './lib/history';
 import { loadParquet } from './lib/parquet';
 import { planCompare, planRun, type PlannedRequest } from './lib/plan';
@@ -23,14 +22,23 @@ import { executePlan, type LatestPreview } from './lib/runner';
 import {
   columnsParam,
   DEFAULT_SETTINGS,
+  findDataset,
   fitToServer,
+  offsetMode,
   randomOffset,
+  resolveDataset,
   sanitizeSettings,
   selectedColumns,
   type Settings,
+  switchDataset,
 } from './lib/settings';
 import { STORAGE_KEYS } from './lib/storage';
 import type { BenchReport, Measurement } from './lib/types';
+
+interface BenchResult {
+  dataset: string;
+  report: BenchReport;
+}
 
 const BENCH_MAX_ROWS = 1_000_000;
 
@@ -66,7 +74,7 @@ export function App() {
   const [history, setHistory] = usePersistentState<Measurement[]>(STORAGE_KEYS.history, parseHistory, []);
   const [runBatch, setRunBatch] = useState<Measurement[]>([]);
   const [compareBatch, setCompareBatch] = useState<Measurement[]>([]);
-  const [bench, setBench] = useState<BenchReport | null>(null);
+  const [bench, setBench] = useState<BenchResult | null>(null);
   const [preview, setPreview] = useState<LatestPreview | null>(null);
 
   const runRef = useRef<HTMLElement>(null);
@@ -78,14 +86,17 @@ export function App() {
 
   const { info } = server;
   const settings = info ? fitToServer(storedSettings, info) : storedSettings;
-  const columns = info ? selectedColumns(settings, info.columns) : [];
+  const dataset = info ? findDataset(info, settings.dataset) : null;
+  const columns = dataset ? selectedColumns(settings, dataset.columns) : [];
   const blockedReason = !info
     ? server.loading
       ? 'Connecting to the server…'
       : 'The server is not reachable. Check the API base URL above.'
-    : columns.length === 0
-      ? 'Select at least one column.'
-      : null;
+    : !dataset
+      ? 'The server lists no datasets.'
+      : columns.length === 0
+        ? 'Select at least one column.'
+        : null;
 
   // Fetch and compile parquet-wasm as soon as Parquet is picked, so the first run doesn't wait for it.
   const wantsParquet = settings.useArrow && settings.arrowFlavor === 'parquet';
@@ -93,9 +104,14 @@ export function App() {
     if (wantsParquet) loadParquet().catch(() => {});
   }, [wantsParquet]);
 
+  // Changes apply to the dataset on screen, which may be the fallback for a stored one the server lacks.
   const updateSettings = useCallback(
-    (patch: Partial<Settings>) => setSettings((s) => ({ ...s, ...patch })),
-    [setSettings],
+    (patch: Partial<Settings>) => setSettings((s) => ({ ...(info ? resolveDataset(s, info) : s), ...patch })),
+    [setSettings, info],
+  );
+  const selectDataset = useCallback(
+    (name: string) => setSettings((s) => switchDataset(info ? resolveDataset(s, info) : s, name)),
+    [setSettings, info],
   );
 
   const startPlan = (kind: 'run' | 'compare', plan: PlannedRequest[]) => {
@@ -108,7 +124,9 @@ export function App() {
         kind,
         batchId,
         plan,
-        useColumn: pickUseColumn(columns),
+        columns,
+        useScope: settings.useScope,
+        offsetMode: offsetMode(settings),
         signal,
         onProgress: report,
         onMeasurement: (m) => {
@@ -121,26 +139,27 @@ export function App() {
   };
 
   const onRun = () => {
-    if (info) startPlan('run', planRun(settings, info));
+    if (dataset) startPlan('run', planRun(settings, dataset));
   };
   const onCompare = () => {
-    if (info) startPlan('compare', planCompare(settings, info));
+    if (dataset) startPlan('compare', planCompare(settings, dataset));
   };
   const onBench = () => {
-    if (!info) return;
+    if (!info || !dataset) return;
     const rows = Math.min(settings.rows, info.max_rows, BENCH_MAX_ROWS);
     runner.start('bench', async (signal) => {
       const report = await fetchBench(
         apiBase,
         {
+          dataset: dataset.name,
           rows,
-          offset: settings.randomizeOffset ? randomOffset(info.max_id, rows) : settings.offset,
-          columns: columnsParam(settings, info.columns),
+          offset: settings.randomizeOffset ? randomOffset(dataset, rows) : settings.offset,
+          columns: columnsParam(settings, dataset.columns),
           cache: settings.cache,
         },
         signal,
       );
-      setBench(report);
+      setBench({ dataset: dataset.name, report });
     });
   };
 
@@ -153,6 +172,7 @@ export function App() {
           apiBase={apiBase}
           onApiBaseChange={setApiBase}
           server={server}
+          dataset={dataset}
           rtt={rtt}
           busy={busy}
           theme={theme}
@@ -162,7 +182,7 @@ export function App() {
           <Hero
             settings={settings}
             onChange={updateSettings}
-            columnCount={columns.length || info?.columns.length || 0}
+            columnCount={columns.length}
             ready={blockedReason === null}
             blockedReason={blockedReason}
             activity={runner.activity}
@@ -183,7 +203,14 @@ export function App() {
 
           <div className="workspace">
             <aside className="sidebar">
-              <SettingsPanel settings={settings} info={info} onChange={updateSettings} disabled={busy} />
+              <SettingsPanel
+                settings={settings}
+                info={info}
+                dataset={dataset}
+                onChange={updateSettings}
+                onDatasetChange={selectDataset}
+                disabled={busy}
+              />
             </aside>
 
             <div className="results">
@@ -194,6 +221,10 @@ export function App() {
                     <li>
                       Press <strong>Run</strong> with <strong>Use Arrow</strong> on, then turn it off and run again: the
                       result card compares the two.
+                    </li>
+                    <li>
+                      Pick another <strong>dataset</strong> in the settings to see what a 7-table join or an aggregate
+                      view costs the database, and how much of the difference the format still makes.
                     </li>
                     <li>
                       Or press <strong>Compare</strong> to run JSON, Arrow IPC and Parquet side by side, interleaved.
@@ -211,7 +242,7 @@ export function App() {
               {compareBatch.length > 0 && (
                 <CompareCard ref={compareRef} batch={compareBatch} running={runner.activity?.kind === 'compare'} />
               )}
-              {bench && <BenchCard ref={benchRef} report={bench} />}
+              {bench && <BenchCard ref={benchRef} report={bench.report} dataset={bench.dataset} />}
               {preview && <PreviewCard preview={preview} />}
               <HistoryCard history={history} onClear={() => setHistory([])} />
               <HowToRead defaultOpen={!hasResults} />

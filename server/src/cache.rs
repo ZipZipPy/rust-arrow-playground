@@ -1,16 +1,19 @@
 //! Small in-memory LRU cache for fetched rows.
 //!
 //! It lets `/api/data?cache=true` measure encoding without the database.
-//! Rows are large (roughly 0.7 KB each with all columns), so the cache is
-//! bounded both by entry count and by the total number of cached rows.
+//! Rows are large (roughly 0.8 KB each with all `orders` columns), so the
+//! cache is bounded both by entry count and by the total number of cached
+//! rows.
+//!
+//! Freeing a million rows takes tens of milliseconds, so methods that drop
+//! entries hand them back to the caller instead of freeing them while
+//! holding the lock.
 
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use crate::db::FetchedRows;
+use crate::db::{FetchedRows, SeedGeneration};
 use crate::query::RowsQuery;
-
-pub type RowCache = BoundedCache<RowsQuery, FetchedRows>;
 
 /// LRU cache bounded by entry count and by the summed weight of its values.
 /// Lookups are linear, which is fine for the handful of entries it holds.
@@ -54,11 +57,14 @@ impl<K: Eq, V> BoundedCache<K, V> {
     }
 
     /// Stores `value`, evicting least recently used entries to stay within
-    /// both bounds. A value heavier than the whole budget is not stored.
-    pub fn insert(&self, key: K, value: Arc<V>, weight: usize) {
+    /// both bounds, and returns the values it dropped. A value heavier than
+    /// the whole budget is not stored.
+    #[must_use = "evicted values should be freed off the async runtime"]
+    pub fn insert(&self, key: K, value: Arc<V>, weight: usize) -> Vec<Arc<V>> {
         if self.max_entries == 0 || weight > self.max_weight {
-            return;
+            return Vec::new();
         }
+        let mut dropped = Vec::new();
         let mut state = self.lock();
         if let Some(position) = state.entries.iter().position(|entry| entry.key == key) {
             let old = state
@@ -66,6 +72,7 @@ impl<K: Eq, V> BoundedCache<K, V> {
                 .remove(position)
                 .expect("position is in range");
             state.weight -= old.weight;
+            dropped.push(old.value);
         }
         while state.entries.len() >= self.max_entries || state.weight + weight > self.max_weight {
             let evicted = state
@@ -73,9 +80,19 @@ impl<K: Eq, V> BoundedCache<K, V> {
                 .pop_front()
                 .expect("over budget implies entries");
             state.weight -= evicted.weight;
+            dropped.push(evicted.value);
         }
         state.weight += weight;
         state.entries.push_back(Entry { key, value, weight });
+        dropped
+    }
+
+    /// Empties the cache and returns the values it held.
+    #[must_use = "dropped values should be freed off the async runtime"]
+    pub fn clear(&self) -> Vec<Arc<V>> {
+        let mut state = self.lock();
+        state.weight = 0;
+        state.entries.drain(..).map(|entry| entry.value).collect()
     }
 
     pub fn len(&self) -> usize {
@@ -91,10 +108,75 @@ impl<K: Eq, V> BoundedCache<K, V> {
         self.lock().weight
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, State<K, V>> {
+    fn lock(&self) -> MutexGuard<'_, State<K, V>> {
         // The state is consistent after every statement, so a panic while
         // holding the lock cannot leave it half-updated.
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// The row cache of `/api/data` and `/api/bench`. Its entries were all read
+/// under one seed generation; seeing another one (a re-seed while the app
+/// runs) drops them all, so rows of dropped tables are never served.
+pub struct RowCache {
+    entries: BoundedCache<RowsQuery, FetchedRows>,
+    generation: Mutex<Option<SeedGeneration>>,
+}
+
+impl RowCache {
+    /// At most `max_entries` results and `max_rows` rows in total.
+    pub fn new(max_entries: usize, max_rows: usize) -> Self {
+        Self {
+            entries: BoundedCache::new(max_entries, max_rows),
+            generation: Mutex::new(None),
+        }
+    }
+
+    /// Records the database's current seed generation; if it changed, empties
+    /// the cache and returns what it held.
+    #[must_use = "dropped rows should be freed off the async runtime"]
+    pub fn sync_generation(&self, current: Option<SeedGeneration>) -> Vec<Arc<FetchedRows>> {
+        let mut generation = self
+            .generation
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if *generation == current {
+            return Vec::new();
+        }
+        *generation = current;
+        self.entries.clear()
+    }
+
+    pub fn get(&self, query: &RowsQuery) -> Option<Arc<FetchedRows>> {
+        self.entries.get(query)
+    }
+
+    /// Stores rows read under `generation`, unless the cache has moved on to
+    /// another one meanwhile. Returns evicted rows.
+    #[must_use = "evicted rows should be freed off the async runtime"]
+    pub fn insert(
+        &self,
+        generation: Option<SeedGeneration>,
+        query: RowsQuery,
+        rows: Arc<FetchedRows>,
+    ) -> Vec<Arc<FetchedRows>> {
+        let current = self
+            .generation
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if *current != generation {
+            return Vec::new();
+        }
+        let weight = rows.rows.len();
+        self.entries.insert(query, rows, weight)
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
     }
 }
 
@@ -102,15 +184,36 @@ impl<K: Eq, V> BoundedCache<K, V> {
 mod tests {
     use super::*;
 
-    fn cache(entries: usize, weight: usize) -> BoundedCache<u32, &'static str> {
-        BoundedCache::new(entries, weight)
+    struct Cache(BoundedCache<u32, &'static str>);
+
+    impl Cache {
+        /// Inserts and returns the dropped values.
+        fn insert(&self, key: u32, value: &'static str, weight: usize) -> Vec<&'static str> {
+            self.0
+                .insert(key, Arc::new(value), weight)
+                .into_iter()
+                .map(|v| *v)
+                .collect()
+        }
+    }
+
+    impl std::ops::Deref for Cache {
+        type Target = BoundedCache<u32, &'static str>;
+
+        fn deref(&self) -> &Self::Target {
+            &self.0
+        }
+    }
+
+    fn cache(entries: usize, weight: usize) -> Cache {
+        Cache(BoundedCache::new(entries, weight))
     }
 
     #[test]
     fn returns_what_was_stored() {
         let cache = cache(2, 100);
         assert!(cache.get(&1).is_none());
-        cache.insert(1, Arc::new("one"), 10);
+        cache.insert(1, "one", 10);
         assert_eq!(*cache.get(&1).unwrap(), "one");
         assert_eq!(cache.weight(), 10);
     }
@@ -118,10 +221,10 @@ mod tests {
     #[test]
     fn evicts_least_recently_used_by_entry_count() {
         let cache = cache(2, 100);
-        cache.insert(1, Arc::new("one"), 1);
-        cache.insert(2, Arc::new("two"), 1);
+        cache.insert(1, "one", 1);
+        cache.insert(2, "two", 1);
         cache.get(&1); // 2 is now the least recently used
-        cache.insert(3, Arc::new("three"), 1);
+        assert_eq!(cache.insert(3, "three", 1), ["two"]);
         assert!(cache.get(&2).is_none());
         assert!(cache.get(&1).is_some());
         assert!(cache.get(&3).is_some());
@@ -131,13 +234,13 @@ mod tests {
     #[test]
     fn evicts_until_the_weight_fits() {
         let cache = cache(8, 100);
-        cache.insert(1, Arc::new("one"), 40);
-        cache.insert(2, Arc::new("two"), 40);
-        cache.insert(3, Arc::new("three"), 50);
+        cache.insert(1, "one", 40);
+        cache.insert(2, "two", 40);
+        cache.insert(3, "three", 50);
         assert!(cache.get(&1).is_none());
         assert!(cache.get(&2).is_some());
         assert_eq!(cache.weight(), 90);
-        cache.insert(4, Arc::new("four"), 95);
+        assert_eq!(cache.insert(4, "four", 95), ["three", "two"]);
         assert!(cache.get(&2).is_none());
         assert!(cache.get(&3).is_none());
         assert!(cache.get(&4).is_some());
@@ -147,8 +250,8 @@ mod tests {
     #[test]
     fn skips_values_heavier_than_the_budget() {
         let cache = cache(8, 100);
-        cache.insert(1, Arc::new("one"), 10);
-        cache.insert(2, Arc::new("huge"), 101);
+        cache.insert(1, "one", 10);
+        cache.insert(2, "huge", 101);
         assert!(cache.get(&2).is_none());
         assert!(
             cache.get(&1).is_some(),
@@ -159,8 +262,8 @@ mod tests {
     #[test]
     fn replacing_a_key_releases_its_weight() {
         let cache = cache(8, 100);
-        cache.insert(1, Arc::new("old"), 60);
-        cache.insert(1, Arc::new("new"), 70);
+        cache.insert(1, "old", 60);
+        assert_eq!(cache.insert(1, "new", 70), ["old"]);
         assert_eq!(*cache.get(&1).unwrap(), "new");
         assert_eq!(cache.weight(), 70);
         assert_eq!(cache.len(), 1);
@@ -169,7 +272,18 @@ mod tests {
     #[test]
     fn zero_entries_disables_the_cache() {
         let cache = cache(0, 100);
-        cache.insert(1, Arc::new("one"), 1);
+        cache.insert(1, "one", 1);
         assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn clear_hands_back_every_value() {
+        let cache = cache(8, 100);
+        cache.insert(1, "one", 10);
+        cache.insert(2, "two", 10);
+        let cleared: Vec<&str> = cache.clear().into_iter().map(|v| *v).collect();
+        assert_eq!(cleared, ["one", "two"]);
+        assert!(cache.is_empty());
+        assert_eq!(cache.weight(), 0);
     }
 }

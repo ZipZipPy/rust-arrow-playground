@@ -5,6 +5,7 @@ pub mod cache;
 pub mod config;
 pub mod convert;
 pub mod db;
+pub mod ddl;
 pub mod encode;
 pub mod export;
 pub mod pg_time;

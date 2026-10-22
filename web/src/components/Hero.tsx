@@ -22,6 +22,7 @@ const FLAVORS = [
 ] as const satisfies readonly { value: ArrowFlavor; label: string; title: string }[];
 
 const ACTIVITY_LABEL = { run: 'Running', compare: 'Comparing', bench: 'Server benchmark' } as const;
+const ROLE_LABEL = { warmup: 'warm-up', prime: 'loading the row cache' } as const;
 
 function describeFormat(s: Settings): string {
   if (!s.useArrow) return 'Rows as JSON objects. The browser has to parse every character and build one object per row.';
@@ -62,8 +63,14 @@ export function Hero(props: HeroProps) {
           disabled={busy}
         />
         <p className="hero-summary">
-          Next run sends <strong>{variant}</strong> · {formatInt(settings.rows)} rows × {props.columnCount} columns · HTTP
-          compression {settings.httpCompression ? 'on' : 'off'}
+          Next run sends <strong>{variant}</strong> · {formatInt(settings.rows)} rows × {props.columnCount} columns
+          {settings.dataset && (
+            <>
+              {' '}
+              of <strong>{settings.dataset}</strong>
+            </>
+          )}{' '}
+          · HTTP compression {settings.httpCompression ? 'on' : 'off'}
         </p>
       </div>
 
@@ -93,7 +100,10 @@ export function Hero(props: HeroProps) {
                 {progress && (
                   <>
                     {' · '}
-                    {progress.current.warmup ? 'warm-up' : `request ${progress.done + 1} of ${progress.total}`} ·{' '}
+                    {progress.current.role === 'measure'
+                      ? `request ${progress.done + 1} of ${progress.total}`
+                      : ROLE_LABEL[progress.current.role]}{' '}
+                    ·{' '}
                     {variantLabel(progress.current.request)}
                   </>
                 )}

@@ -1,6 +1,6 @@
 import { formatInt } from '../../lib/format';
 import type { LatestPreview } from '../../lib/runner';
-import { Card } from './common';
+import { Card, TableScroll } from './common';
 
 /** The first rows of the latest decoded response, whichever format it came in. */
 export function PreviewCard({ preview }: { preview: LatestPreview }) {
@@ -10,14 +10,15 @@ export function PreviewCard({ preview }: { preview: LatestPreview }) {
       title="Data preview"
       subtitle={
         <>
-          First {table.rows.length} of {formatInt(preview.rowCount)} rows, decoded from <strong>{preview.variant}</strong>
+          First {table.rows.length} of {formatInt(preview.rowCount)} rows of <strong>{preview.dataset}</strong>, decoded
+          from <strong>{preview.variant}</strong>
         </>
       }
     >
       {table.rows.length === 0 ? (
         <p className="field-hint">The response had no rows. Try a smaller start id.</p>
       ) : (
-        <div className="table-scroll preview-scroll">
+        <TableScroll label={`First rows of ${preview.dataset}`} className="preview-scroll">
           <table className="data-table preview-table">
             <thead>
               <tr>
@@ -38,7 +39,7 @@ export function PreviewCard({ preview }: { preview: LatestPreview }) {
               ))}
             </tbody>
           </table>
-        </div>
+        </TableScroll>
       )}
     </Card>
   );

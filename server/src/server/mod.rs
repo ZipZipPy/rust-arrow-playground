@@ -1,6 +1,7 @@
 //! HTTP server: axum router, shared state and graceful shutdown.
 
 mod bench;
+pub mod compression;
 mod error;
 mod handlers;
 pub mod response;
@@ -18,6 +19,7 @@ use axum::http::{HeaderValue, Method};
 use axum::routing::get;
 use axum::serve::ListenerExt;
 use deadpool_postgres::Pool;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tower_http::LatencyUnit;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::set_header::SetResponseHeaderLayer;
@@ -28,7 +30,7 @@ pub use self::error::ApiError;
 use self::response::{CacheStatus, EXPOSED_HEADERS, TIMING_ALLOW_ORIGIN};
 use crate::cache::RowCache;
 use crate::config::{ServeConfig, ServerInfo};
-use crate::db::{self, FetchedRows};
+use crate::db::{self, FetchedRows, GuardedClient};
 use crate::query::RowsQuery;
 
 /// Server-wide settings that are not part of the pool.
@@ -46,6 +48,9 @@ pub struct AppState(Arc<Inner>);
 struct Inner {
     pool: Pool,
     cache: RowCache,
+    /// One `/api/bench` at a time: each holds every fetched row plus its
+    /// outputs, and runs the machine flat out.
+    bench: Arc<Semaphore>,
     max_rows: u64,
     server_info: ServerInfo,
 }
@@ -63,6 +68,7 @@ impl AppState {
         Self(Arc::new(Inner {
             pool,
             cache: RowCache::new(settings.cache_entries, settings.cache_max_rows),
+            bench: Arc::new(Semaphore::new(1)),
             max_rows: settings.max_rows,
             server_info: settings.server_info,
         }))
@@ -80,42 +86,75 @@ impl AppState {
         &self.0.server_info
     }
 
+    /// Waits until no other benchmark runs. The permit should live as long
+    /// as the benchmark's blocking work, not just its handler.
+    pub async fn bench_permit(&self) -> OwnedSemaphorePermit {
+        Arc::clone(&self.0.bench)
+            .acquire_owned()
+            .await
+            .expect("the semaphore is never closed")
+    }
+
+    /// Reads the rows of `query`, from the cache when `use_cache` allows.
+    ///
+    /// With the cache, the seed generation is read first (one tiny query,
+    /// counted as DB time) and the whole cache dropped if the data was
+    /// re-seeded since its entries were read.
     pub async fn load_rows(
         &self,
         query: RowsQuery,
         use_cache: bool,
     ) -> Result<LoadedRows, ApiError> {
         let started = Instant::now();
+        let client = GuardedClient::new(self.0.pool.get().await?);
         if !use_cache {
-            let rows = Arc::new(self.fetch(&query).await?);
+            let fetched = db::fetch_rows(&client, &query).await;
+            // A query that failed has finished too: the connection is fine.
+            client.release();
+            let rows = Arc::new(fetched?);
             return Ok(LoadedRows {
                 rows,
                 db_time: started.elapsed(),
                 cache: CacheStatus::Off,
             });
         }
+
+        let status = db::seed_status(&client).await;
+        let generation = match status {
+            Ok(status) => status.map(|status| status.generation()),
+            Err(err) => {
+                client.release();
+                return Err(err.into());
+            }
+        };
+        drop_in_background(self.0.cache.sync_generation(generation));
         if let Some(rows) = self.0.cache.get(&query) {
+            client.release();
             return Ok(LoadedRows {
                 rows,
                 db_time: started.elapsed(),
                 cache: CacheStatus::Hit,
             });
         }
-        let rows = Arc::new(self.fetch(&query).await?);
+        let fetched = db::fetch_rows(&client, &query).await;
+        client.release();
+        let rows = Arc::new(fetched?);
         let db_time = started.elapsed();
-        self.0
-            .cache
-            .insert(query, Arc::clone(&rows), rows.rows.len());
+        drop_in_background(self.0.cache.insert(generation, query, Arc::clone(&rows)));
         Ok(LoadedRows {
             rows,
             db_time,
             cache: CacheStatus::Miss,
         })
     }
+}
 
-    async fn fetch(&self, query: &RowsQuery) -> Result<FetchedRows, ApiError> {
-        let client = self.0.pool.get().await?;
-        Ok(db::fetch_rows(&client, query).await?)
+/// Frees `values` on a blocking thread: dropping a million fetched rows
+/// takes tens of milliseconds, which should neither stall an async worker
+/// nor delay a response.
+pub(crate) fn drop_in_background<T: Send + 'static>(values: Vec<T>) {
+    if !values.is_empty() {
+        tokio::task::spawn_blocking(move || drop(values));
     }
 }
 
@@ -140,17 +179,17 @@ pub fn router(state: AppState, static_dir: &Path) -> Router {
             HeaderValue::from_static("no-store"),
         ));
 
-    static_files::with_static_files(Router::new().nest("/api", api), static_dir)
-        .layer(response::compression_layer())
-        .layer(
-            TraceLayer::new_for_http()
-                .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
-                .on_response(
-                    DefaultOnResponse::new()
-                        .level(Level::INFO)
-                        .latency_unit(LatencyUnit::Micros),
-                ),
-        )
+    // No compression layer: data responses are compressed by their handler
+    // (see `compression`), static files by their own service.
+    static_files::with_static_files(Router::new().nest("/api", api), static_dir).layer(
+        TraceLayer::new_for_http()
+            .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
+            .on_response(
+                DefaultOnResponse::new()
+                    .level(Level::INFO)
+                    .latency_unit(LatencyUnit::Micros),
+            ),
+    )
 }
 
 fn cors_layer() -> CorsLayer {
@@ -174,9 +213,15 @@ pub async fn run(config: ServeConfig) -> anyhow::Result<()> {
         let client = db::wait_until_ready(&pool)
             .await
             .context("connecting to PostgreSQL")?;
-        db::ensure_table(&client)
+        let created = db::create_missing_relations(&client)
             .await
-            .context("creating table orders")?;
+            .context("creating the dataset relations")?;
+        if !created.is_empty() {
+            info!(
+                ?created,
+                "created missing relations; run `playground seed` to fill them"
+            );
+        }
     }
 
     let state = AppState::new(
@@ -210,7 +255,7 @@ pub async fn run(config: ServeConfig) -> anyhow::Result<()> {
 
 /// Resolves on SIGINT or SIGTERM (Cloud Run sends SIGTERM before stopping
 /// an instance); in-flight requests are then allowed to finish.
-async fn shutdown_signal() {
+pub async fn shutdown_signal() {
     let interrupt = async {
         if let Err(err) = tokio::signal::ctrl_c().await {
             warn!(error = %err, "cannot listen for SIGINT");

@@ -35,6 +35,11 @@ impl ChunkPlan {
         }
     }
 
+    /// Number of ids the plan covers.
+    pub fn rows(&self) -> u64 {
+        self.rows
+    }
+
     pub fn chunk_count(&self) -> u64 {
         self.rows.div_ceil(self.chunk_size)
     }

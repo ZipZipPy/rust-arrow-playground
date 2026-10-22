@@ -1,3 +1,4 @@
+import { USE_SCOPE_LABELS } from './settings';
 import type { DataFormat, Measurement } from './types';
 
 export interface Summary {
@@ -46,7 +47,7 @@ export function ratio(value: number | null, baseline: number | null): number | n
   return value !== null && baseline !== null && baseline > 0 ? value / baseline : null;
 }
 
-export const PHASES = ['db', 'encode', 'network', 'download', 'decode', 'use', 'other'] as const;
+export const PHASES = ['db', 'encode', 'compress', 'network', 'download', 'decode', 'use', 'other'] as const;
 export type Phase = (typeof PHASES)[number];
 export type PhaseTimes = Record<Phase, number>;
 
@@ -54,6 +55,7 @@ export function phaseTimes(m: Measurement): PhaseTimes {
   return {
     db: m.dbMs ?? 0,
     encode: m.encodeMs ?? 0,
+    compress: m.compressMs ?? 0,
     network: m.networkWaitMs,
     download: m.downloadMs,
     decode: m.decodeMs,
@@ -71,6 +73,9 @@ export interface GroupSummary {
   endToEnd: Summary;
   phases: PhaseTimes;
   decodeMs: number;
+  useMs: number;
+  /** Decode + use: all the browser's work to turn the body into values. */
+  browserMs: number;
   ttfbMs: number;
   downloadMs: number;
   wireBytes: number | null;
@@ -92,6 +97,8 @@ export function summarizeGroup(key: string, items: readonly Measurement[]): Grou
     endToEnd: summarize(items.map((m) => m.endToEndMs)),
     phases,
     decodeMs: median(items.map((m) => m.decodeMs)),
+    useMs: median(items.map((m) => m.useMs)),
+    browserMs: median(items.map((m) => m.decodeMs + m.useMs)),
     ttfbMs: median(items.map((m) => m.ttfbMs)),
     downloadMs: median(items.map((m) => m.downloadMs)),
     wireBytes: medianOf(items.map((m) => m.wireBytes)),
@@ -111,23 +118,67 @@ export function summarizeByFormat(items: readonly Measurement[]): GroupSummary[]
   return [...groups].map(([format, list]) => summarizeGroup(format, list));
 }
 
-/** The fields that make two measurements comparable: same server, rows and columns. */
-type Shape = Pick<Measurement, 'format' | 'rowsRequested' | 'columnsKey' | 'target'>;
+interface PairedSetting {
+  label: string;
+  /** Compared as is. */
+  value: (m: Measurement) => string;
+  /** How a value is shown, when that differs from the value. */
+  show?: (value: string) => string;
+}
+
+function describeColumns(key: string): string {
+  if (key === 'all') return 'all';
+  const names = key.split(',');
+  return names.length <= 3 ? names.join(', ') : `${names.length} picked`;
+}
+
+/** The settings two runs must share before the Arrow vs JSON callout compares them. */
+const PAIRED_SETTINGS: readonly PairedSetting[] = [
+  { label: 'dataset', value: (m) => m.dataset },
+  { label: 'rows', value: (m) => m.rowsRequested.toLocaleString('en-US') },
+  { label: 'columns', value: (m) => m.columnsKey, show: describeColumns },
+  { label: 'HTTP compression', value: (m) => (m.httpCompression ? 'on' : 'off') },
+  { label: 'row cache', value: (m) => (m.rowCache ? 'on' : 'off') },
+  { label: 'start id', value: (m) => m.offsetMode },
+  { label: 'touch data', value: (m) => USE_SCOPE_LABELS[m.useScope].toLowerCase() },
+];
+
+/** One setting that differs between two runs, as shown to the user. */
+export interface SettingDifference {
+  label: string;
+  /** This run's value. */
+  current: string;
+  /** The other run's value. */
+  other: string;
+}
+
+export function settingDifferences(current: Measurement, other: Measurement): SettingDifference[] {
+  const differences: SettingDifference[] = [];
+  for (const { label, value, show = (v: string) => v } of PAIRED_SETTINGS) {
+    const [a, b] = [value(current), value(other)];
+    if (a !== b) differences.push({ label, current: show(a), other: show(b) });
+  }
+  return differences;
+}
+
+export interface Counterpart {
+  summary: GroupSummary;
+  /** Settings that differ from the reference run; empty when the two are comparable. */
+  differences: SettingDifference[];
+}
 
 /**
- * For a JSON result, the latest Arrow/Parquet batch of the same shape; for an
- * Arrow/Parquet result, the latest JSON batch. `history` is newest first.
+ * For a JSON run, the latest Arrow/Parquet batch against the same server; for
+ * an Arrow/Parquet run, the latest JSON batch. Prefers the latest one made
+ * with the same paired settings; otherwise returns the latest one with what
+ * differs, so the caller can say why it does not compare them. `history` is
+ * newest first.
  */
-export function counterpartSummary(history: readonly Measurement[], ref: Shape): GroupSummary | null {
+export function counterpartSummary(history: readonly Measurement[], ref: Measurement): Counterpart | null {
   const wantJson = ref.format !== 'json';
-  const match = history.find(
-    (m) =>
-      (m.format === 'json') === wantJson &&
-      m.rowsRequested === ref.rowsRequested &&
-      m.columnsKey === ref.columnsKey &&
-      m.target === ref.target,
-  );
+  const candidates = history.filter((m) => (m.format === 'json') === wantJson && m.target === ref.target);
+  const match = candidates.find((m) => settingDifferences(ref, m).length === 0) ?? candidates[0];
   if (!match) return null;
   const batch = history.filter((m) => m.batchId === match.batchId && m.variant === match.variant);
-  return summarizeGroup(match.variant, batch);
+  return { summary: summarizeGroup(match.variant, batch), differences: settingDifferences(ref, match) };
 }

@@ -125,3 +125,33 @@ export function toBatchedArrowTable(rows: SampleRow[], batchSize: number, dictio
 
 export const expectedTotal = (rows: SampleRow[]) => rows.reduce((sum, r) => sum + r.total, 0);
 export const expectedRatingSum = (rows: SampleRow[]) => rows.reduce((sum, r) => sum + (r.rating ?? 0), 0);
+
+/** Columns whose values are the same JavaScript value in every format (dates are text in JSON). */
+export const NON_TIME_COLUMNS = ['id', 'country', 'quantity', 'discount', 'total', 'is_returned', 'rating', 'notes'];
+export const TIME_COLUMNS = ['created_at', 'ship_date'];
+
+/**
+ * The "use" checksum over every value of the non-time columns: numbers as
+ * they are, strings by length, true as 1, null as 0.
+ */
+export const expectedNonTimeChecksum = (rows: SampleRow[]) =>
+  rows.reduce(
+    (sum, r) =>
+      sum +
+      Number(r.id) +
+      r.country.length +
+      r.quantity +
+      r.discount +
+      r.total +
+      (r.isReturned ? 1 : 0) +
+      (r.rating ?? 0) +
+      (r.notes?.length ?? 0),
+    0,
+  );
+
+/** Time columns: epoch milliseconds from Arrow, the length of the RFC 3339 / ISO date text from JSON. */
+export const expectedTimeChecksum = (rows: SampleRow[], kind: 'json' | 'arrow') =>
+  rows.reduce((sum, r) => {
+    if (kind === 'json') return sum + 27 + (r.shipDay === null ? 0 : 10);
+    return sum + Number(r.createdMicros) / 1000 + (r.shipDay === null ? 0 : r.shipDay * DAY_MS);
+  }, 0);

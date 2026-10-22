@@ -51,8 +51,18 @@ describe('ratios', () => {
 
 describe('phaseTimes', () => {
   it('maps a measurement to stacked-bar phases, treating missing server times as 0', () => {
-    const m = makeMeasurement({ dbMs: null, encodeMs: 2, networkWaitMs: 3, downloadMs: 4, decodeMs: 5, useMs: 6, otherMs: 1 });
-    expect(phaseTimes(m)).toEqual({ db: 0, encode: 2, network: 3, download: 4, decode: 5, use: 6, other: 1 });
+    const m = makeMeasurement({
+      dbMs: null,
+      encodeMs: 2,
+      compressMs: null,
+      networkWaitMs: 3,
+      downloadMs: 4,
+      decodeMs: 5,
+      useMs: 6,
+      otherMs: 1,
+    });
+    expect(phaseTimes(m)).toEqual({ db: 0, encode: 2, compress: 0, network: 3, download: 4, decode: 5, use: 6, other: 1 });
+    expect(phaseTimes(makeMeasurement({ compressMs: 7 })).compress).toBe(7);
   });
 });
 
@@ -77,7 +87,7 @@ describe('summarizeByFormat', () => {
 });
 
 describe('counterpartSummary', () => {
-  it('finds the latest batch of the other family with the same shape', () => {
+  it('finds the latest batch of the other family with the same settings', () => {
     const history = [
       makeMeasurement({ format: 'arrow', variant: 'Arrow IPC', batchId: 3, endToEndMs: 10 }),
       makeMeasurement({ format: 'json', batchId: 2, rowsRequested: 5, endToEndMs: 999 }),
@@ -85,12 +95,62 @@ describe('counterpartSummary', () => {
       makeMeasurement({ format: 'json', batchId: 1, endToEndMs: 300 }),
       makeMeasurement({ format: 'arrow', variant: 'Arrow IPC', batchId: 1, endToEndMs: 1 }),
     ];
-    const json = counterpartSummary(history, { format: 'parquet', rowsRequested: 1000, columnsKey: 'all', target: 'same origin' });
-    expect(json?.variant).toBe('JSON');
-    expect(json?.count).toBe(2);
-    expect(json?.endToEnd.median).toBe(200);
-    const arrow = counterpartSummary(history, { format: 'json', rowsRequested: 1000, columnsKey: 'all', target: 'same origin' });
-    expect(arrow?.endToEnd.median).toBe(10);
-    expect(counterpartSummary(history, { format: 'json', rowsRequested: 1000, columnsKey: 'id', target: 'same origin' })).toBeNull();
+    const json = counterpartSummary(history, makeMeasurement({ format: 'parquet', variant: 'Parquet · snappy' }));
+    expect(json?.differences).toEqual([]);
+    expect(json?.summary.variant).toBe('JSON');
+    expect(json?.summary.count).toBe(2);
+    expect(json?.summary.endToEnd.median).toBe(200);
+    const arrow = counterpartSummary(history, makeMeasurement({ format: 'json' }));
+    expect(arrow?.summary.endToEnd.median).toBe(10);
+    expect(counterpartSummary(history, makeMeasurement({ format: 'json', target: 'svc.run.app' }))).toBeNull();
+  });
+
+  it.each([
+    ['dataset', { dataset: 'order_lines' }, 'order_lines', 'orders'],
+    ['rows', { rowsRequested: 5000 }, '5,000', '1,000'],
+    ['columns', { columnsKey: 'id,total' }, 'id, total', 'all'],
+    ['HTTP compression', { httpCompression: false }, 'off', 'on'],
+    ['row cache', { rowCache: true }, 'on', 'off'],
+    ['start id', { offsetMode: 'random' }, 'random', 'fixed'],
+    ['touch data', { useScope: 'column' }, 'one column', 'every value'],
+  ] as const)('does not pair runs with a different %s, and says what differs', (label, change, current, other) => {
+    const history = [makeMeasurement({ format: 'json', batchId: 1 })];
+    const result = counterpartSummary(history, makeMeasurement({ format: 'arrow', variant: 'Arrow IPC', batchId: 2, ...change }));
+    expect(result?.differences).toEqual([{ label, current, other }]);
+  });
+
+  it('prefers an older batch with the same settings over a newer one that differs', () => {
+    const history = [
+      makeMeasurement({ format: 'json', batchId: 3, httpCompression: false, endToEndMs: 50 }),
+      makeMeasurement({ format: 'json', batchId: 2, endToEndMs: 70 }),
+    ];
+    const result = counterpartSummary(history, makeMeasurement({ format: 'arrow', variant: 'Arrow IPC', batchId: 4 }));
+    expect(result?.differences).toEqual([]);
+    expect(result?.summary.endToEnd.median).toBe(70);
+  });
+
+  it('does not count fixed start ids or HTTP encodings the server picked as differences', () => {
+    const history = [makeMeasurement({ format: 'json', offset: 100, contentEncoding: 'zstd', cache: 'miss', rowCache: true })];
+    const ref = makeMeasurement({ format: 'arrow', offset: 900, contentEncoding: null, cache: 'hit', rowCache: true });
+    expect(counterpartSummary(history, ref)?.differences).toEqual([]);
+  });
+
+  it('describes long column selections by count', () => {
+    const history = [makeMeasurement({ format: 'json', columnsKey: 'a,b,c,d,e' })];
+    const result = counterpartSummary(history, makeMeasurement({ format: 'arrow', columnsKey: 'a,b,c,d' }));
+    expect(result?.differences).toEqual([{ label: 'columns', current: '4 picked', other: '5 picked' }]);
+  });
+});
+
+describe('summarizeGroup', () => {
+  it('reports browser work as the median of decode + use', () => {
+    const [group] = summarizeByFormat([
+      makeMeasurement({ decodeMs: 10, useMs: 1 }),
+      makeMeasurement({ decodeMs: 1, useMs: 30 }),
+      makeMeasurement({ decodeMs: 2, useMs: 2 }),
+    ]);
+    expect(group?.decodeMs).toBe(2);
+    expect(group?.useMs).toBe(2);
+    expect(group?.browserMs).toBe(11);
   });
 });

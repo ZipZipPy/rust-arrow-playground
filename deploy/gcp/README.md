@@ -125,12 +125,19 @@ gcloud sql databases create playground --instance=arrow-playground-pg
 
 Sizing for tens of millions of rows:
 
-- **Data size.** A row of `orders` takes about 250 bytes on disk including
-  its two indexes (`/api/info` reports `table_bytes`: 249 MB for 1M rows).
-  20M rows are about 5 GB; 50M rows about 12.5 GB.
+- **Data size.** One order takes about 850 bytes on disk across all
+  datasets: about 250 bytes in `orders`, about 275 bytes for its ~2.5 order
+  lines in `order_items`, plus customers, indexes, foreign keys and the
+  `daily_sales` materialized view (`/api/info` reports `bytes` per dataset:
+  253 MB for `orders` and 554 MB for everything behind `order_lines` at 1M
+  orders). 20M orders are about 17 GB; 50M orders about 42 GB.
 - **Memory.** The benchmark should measure PostgreSQL and the network, not
-  disk reads. With 16 GiB, a 20M-row table stays in shared buffers and the OS
-  page cache after the first read. For 50M+ rows use `--memory=32GiB`, or
+  disk reads. With 16 GiB, the 20M-order `orders` table (about 5 GB) stays in
+  shared buffers and the OS page cache after the first read; reading the
+  join view over all of its ~11 GB of joined tables needs more, so give the
+  instance 26-32 GiB if you benchmark `order_lines` at that size. For 50M+ rows use 8 vCPUs with 32 GiB
+  (`SQL_CPU=8 SQL_MEMORY=32GiB`; Enterprise custom machines allow at most
+  6.5 GB per vCPU, so 4 vCPUs top out at 26 GiB), or
   Enterprise Plus with its data cache (`--edition=enterprise-plus
   --tier=db-perf-optimized-N-4 --enable-data-cache`), which costs more.
 - **vCPUs.** One request is one query on one backend, so a single benchmark
@@ -156,7 +163,10 @@ string goes into Secret Manager:
 ```sh
 PASSWORD=$(openssl rand -hex 24)
 CONNECTION=$(gcloud sql instances describe arrow-playground-pg --format='value(connectionName)')
-gcloud sql users create playground --instance=arrow-playground-pg --password=$PASSWORD
+# gcloud logs command lines (flag values included) under ~/.config/gcloud/logs,
+# so turn file logging off for the command that carries the password.
+CLOUDSDK_CORE_DISABLE_FILE_LOGGING=1 \
+  gcloud sql users create playground --instance=arrow-playground-pg --password="$PASSWORD"
 printf 'host=/cloudsql/%s user=playground password=%s dbname=playground' "$CONNECTION" "$PASSWORD" |
   gcloud secrets create arrow-playground-database-url --replication-policy=automatic --data-file=-
 ```
@@ -191,12 +201,14 @@ gcloud run jobs deploy arrow-playground-seed --image=$IMAGE --region=$REGION \
 - **Memory.** Workers stream chunks of `SEED_BATCH_SIZE` (50,000) rows; a
   local 1M-row seed peaked at about 12 MB. 2 GiB is simply the minimum Cloud
   Run accepts with 4 vCPUs.
-- **Timeout.** 20M rows usually load in well under an hour (disk throughput
-  and the index build dominate). The 2-hour task timeout leaves room for
+- **Timeout.** 20M orders (about 50M order lines) usually load in well under
+  an hour (disk throughput, the key and foreign-key builds and the
+  materialized view dominate; locally 1M orders take about 20 s). The 2-hour task timeout leaves room for
   larger loads, and `--max-retries=0` avoids repeating a failed load.
 
 To replace the data with a different size, run the job once with other
-arguments (without `--if-empty`, `seed` drops and recreates the table):
+arguments (without `--if-empty`, `seed` drops and recreates every table and
+view; the running service notices the new seed and drops its row cache):
 
 ```sh
 gcloud run jobs execute arrow-playground-seed --region=$REGION \
@@ -243,6 +255,13 @@ itself. `PORT` is reserved and set by Cloud Run from `--port`.
 - **Request timeout.** A 435 MB uncompressed JSON body over a 50 Mbit/s link
   takes over a minute; over a weak mobile link much longer. `--timeout=900`
   (15 minutes) leaves room.
+- **The live aggregate.** `daily_sales_live` aggregates every order line on
+  every request: about 5 s at 1M orders locally, so roughly 1-2 minutes at
+  20M orders, longer with Cloud SQL's default `work_mem` (sorts spill to
+  disk). That is the point of the dataset, but raise `work_mem` with
+  `--database-flags=work_mem=65536` (64 MB) when creating the instance if you
+  want it to stay well inside the request timeout, and compare it with the
+  `daily_sales` materialized view.
 - **Cold starts.** `--min-instances=1` keeps one instance (and its database
   connection pool) warm, so the first run is not a cold start that skews the
   results. `--cpu-boost` shortens the cold starts that still happen when a
