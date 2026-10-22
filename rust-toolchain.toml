@@ -1,0 +1,7 @@
+# Pinned Rust toolchain (see docs/DESIGN.md, "Toolchain versions").
+# rustup picks this up for every cargo command under the repository, and CI
+# installs it with `rustup toolchain install`.
+[toolchain]
+channel = "1.99.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

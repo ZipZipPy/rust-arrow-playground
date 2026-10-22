@@ -1,0 +1,338 @@
+/* Switch */
+
+.switch {
+  --track-w: 38px;
+  --track-h: 22px;
+  --thumb: 16px;
+  --switch-gap: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.switch[data-disabled] {
+  opacity: 0.6;
+}
+
+.switch-control {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--switch-gap);
+  cursor: pointer;
+}
+
+.switch[data-disabled] .switch-control {
+  cursor: not-allowed;
+}
+
+/* The real checkbox covers the whole control, invisible, so it gets every click. */
+.switch input {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: inherit;
+}
+
+.switch-track {
+  position: relative;
+  flex: none;
+  width: var(--track-w);
+  height: var(--track-h);
+  border-radius: 999px;
+  background: var(--surface-3);
+  box-shadow: inset 0 0 0 1px var(--border-strong);
+  transition: background-color 0.18s;
+}
+
+.switch-thumb {
+  position: absolute;
+  top: calc((var(--track-h) - var(--thumb)) / 2);
+  left: calc((var(--track-h) - var(--thumb)) / 2);
+  width: var(--thumb);
+  height: var(--thumb);
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+  transition: transform 0.18s;
+}
+
+.switch input:checked + .switch-track {
+  background: var(--accent);
+  box-shadow: none;
+}
+
+.switch input:checked + .switch-track .switch-thumb {
+  transform: translateX(calc(var(--track-w) - var(--track-h)));
+}
+
+.switch input:focus-visible + .switch-track {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.switch-label {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.switch-description {
+  padding-left: calc(var(--track-w) + var(--switch-gap));
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+
+.switch-large {
+  --track-w: 76px;
+  --track-h: 42px;
+  --thumb: 34px;
+  --switch-gap: 18px;
+  gap: 6px;
+}
+
+.switch-large .switch-label {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  font-size: 26px;
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: -0.01em;
+}
+
+.switch-large .switch-description {
+  max-width: 600px;
+  color: var(--text-2);
+  font-size: 14px;
+}
+
+.switch-state {
+  padding: 2px 10px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 20px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.hero-json .switch-state {
+  background: var(--surface-3);
+  color: var(--text-2);
+}
+
+/* Segmented control */
+
+.segmented {
+  display: inline-flex;
+  gap: 2px;
+  max-width: 100%;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--surface-2);
+}
+
+/* Equal cells, so a narrow sidebar wraps into even rows instead of orphaning the last option. */
+.segmented-wrap {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(46px, 1fr));
+}
+
+.segmented.segmented-wrap button {
+  padding-inline: 4px;
+}
+
+.segmented button {
+  min-height: 30px;
+  padding: 4px 12px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: 13.5px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.segmented button:hover:not(:disabled) {
+  color: var(--text);
+}
+
+.segmented button[aria-checked='true'],
+.segmented button[aria-pressed='true'] {
+  background: var(--surface);
+  color: var(--text);
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.12),
+    0 0 0 1px var(--border);
+}
+
+.segmented button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+/* Fields */
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.field label,
+.connection label {
+  color: var(--text-2);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+input[type='text'],
+input[type='url'],
+select {
+  width: 100%;
+  min-height: 36px;
+  padding: 6px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+
+input:disabled,
+select:disabled {
+  opacity: 0.55;
+}
+
+input[aria-invalid='true'] {
+  border-color: var(--bad);
+}
+
+.field-hint {
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.field-error {
+  color: var(--bad);
+  font-size: 13px;
+}
+
+.field-pair {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.checkbox {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 13.5px;
+  cursor: pointer;
+}
+
+.checkbox input {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  margin: 2px 0 0;
+  accent-color: var(--accent);
+}
+
+/* Settings panel */
+
+.settings {
+  padding: 4px 18px 8px;
+}
+
+.settings-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px 0;
+  border-bottom: 1px solid var(--grid);
+}
+
+.settings-section:last-child {
+  border-bottom: 0;
+}
+
+.settings-section-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.settings-section h3 {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.section-note {
+  color: var(--muted);
+  font-size: 12px;
+  font-style: italic;
+}
+
+.columns {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.column-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 0 12px;
+  padding: 0;
+  list-style: none;
+}
+
+.column-item {
+  align-items: center;
+  padding: 3px 0;
+}
+
+.column-item input {
+  margin: 0;
+}
+
+.column-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 640px) {
+  .column-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .badge-type {
+    display: none;
+  }
+}
