@@ -13,8 +13,9 @@
 #     repository does not keep) on its main branch;
 #   - service account github-deployer@PROJECT_ID.iam.gserviceaccount.com,
 #     which those runs may impersonate, with the roles deploy.sh and
-#     teardown.sh need (Editor, Project IAM Admin, Secret Manager Admin,
-#     Service Account Admin). Use a project dedicated to the playground.
+#     teardown.sh need (Editor, Cloud Run Admin, Project IAM Admin, Secret
+#     Manager Admin, Service Account Admin). Use a project dedicated to the
+#     playground.
 #
 # Re-runnable: existing resources are kept, the provider's condition is reset
 # to the one below, and role bindings are only added. Undo with
@@ -97,10 +98,13 @@ if ! exists gcloud iam service-accounts describe "$SA"; then
 fi
 
 # Editor covers Cloud Run, Cloud SQL, Artifact Registry, Cloud Build and
-# enabling APIs; deploy.sh also creates a service account and grants roles on
-# the project and on a secret, which Editor alone may not do.
+# enabling APIs. deploy.sh also creates a service account, grants roles on
+# the project and on a secret, and makes the Cloud Run services public
+# (run.services.setIamPolicy, which only Cloud Run Admin and Owner have);
+# Editor alone may do none of that.
 for role in \
   roles/editor \
+  roles/run.admin \
   roles/resourcemanager.projectIamAdmin \
   roles/secretmanager.admin \
   roles/iam.serviceAccountAdmin; do

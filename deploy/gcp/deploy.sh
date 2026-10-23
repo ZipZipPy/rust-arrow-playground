@@ -86,6 +86,25 @@ gcloud services enable \
   secretmanager.googleapis.com \
   iam.googleapis.com
 
+# Projects created since 2024 run Cloud Build as the Compute Engine default
+# service account, which only has what it needs to read the uploaded source,
+# write logs and push the image when the project still grants it Editor
+# automatically. Grant the Cloud Build role outright, early, so the grant has
+# spread by the time the build starts. Older projects build as the Cloud
+# Build service account, which has the role already.
+if [[ "$BUILDER" == cloud-build ]]; then
+  project_number="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
+  build_sa="${project_number}-compute@developer.gserviceaccount.com"
+  if exists gcloud iam service-accounts describe "$build_sa"; then
+    log "Granting $build_sa the Cloud Build role"
+    retry gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+      --member="serviceAccount:$build_sa" \
+      --role=roles/cloudbuild.builds.builder \
+      --condition=None >/dev/null
+  fi
+  unset project_number build_sa
+fi
+
 # Stop here, before creating anything, if the existing database is in
 # another region, the image to deploy does not exist, or the DATABASE_URL
 # secret belongs to another instance (the secret, the job and the services
@@ -291,6 +310,14 @@ for region in "${REGION_LIST[@]}"; do
     --cpu-boost \
     "$http2_flag" \
     --allow-unauthenticated
+  # --allow-unauthenticated only warns when it cannot set the policy (the
+  # deploying account lacks run.services.setIamPolicy), which would leave a
+  # service that answers 403 to every browser. This fails instead.
+  retry gcloud run services add-iam-policy-binding "$SERVICE" \
+    --region="$region" \
+    --member=allUsers \
+    --role=roles/run.invoker \
+    --condition=None >/dev/null
   urls+=("$(gcloud run services describe "$SERVICE" --region="$region" --format='value(status.url)')")
 done
 

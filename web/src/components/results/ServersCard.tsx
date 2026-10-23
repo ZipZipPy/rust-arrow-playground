@@ -82,7 +82,11 @@ export function ServersCard({ servers, batch, running, ref }: ServersCardProps) 
   const most = Math.max(...rowCounts);
   const sameRows = fewest === most;
   const variant = (format: DataFormat) => batch.find((m) => m.format === format)?.variant ?? FORMAT_LABELS[format];
-  const misses = batch.filter((m) => m.cache !== 'hit').length;
+  const missed = rows.flatMap(({ server, summary }) =>
+    summary.cacheMisses > 0
+      ? [`${server.label} (${summary.cacheMisses} of ${summary.formats.reduce((n, g) => n + g.count, 0)})`]
+      : [],
+  );
   const usesFallback = batch.some((m) => m.timingSource === 'fetch');
   const group = (summary: ServerSummary, format: DataFormat) => summary.formats.find((g) => g.format === format);
 
@@ -101,16 +105,22 @@ export function ServersCard({ servers, batch, running, ref }: ServersCardProps) 
         </>
       }
     >
-      {sameRows ? (
+      {!sameRows && (
         <p className="callout">
-          Every server read the same rows from its row cache, loaded before each round, so the database is left out
-          and these times are the network, encoding and decoding, wherever the database is.
+          The servers returned different numbers of rows (under each name in the table), so their times do not compare
+          directly.
+        </p>
+      )}
+      {missed.length === 0 ? (
+        <p className="callout">
+          Every server read {sameRows ? 'the same rows' : 'its rows'} from its row cache, loaded before each round, so
+          the database is left out and these times are the network, encoding and decoding, wherever the database is.
         </p>
       ) : (
         <p className="callout">
-          The servers returned different numbers of rows (under each name in the table), so their times do not compare
-          directly. Each server read its rows from its row cache, loaded before each round, so the database is left
-          out.
+          Not every request was answered from the row cache, so some times include the database, and a server far from
+          it looks slower for that alone. Requests that missed: {missed.join(', ')}. A server with several instances
+          keeps one cache per instance; run again to compare without the database.
         </p>
       )}
 
@@ -183,12 +193,6 @@ export function ServersCard({ servers, batch, running, ref }: ServersCardProps) 
         <Term term="download">download</Term> and <Term term="decode">decode</Term>. RTT was measured just before the
         requests, one server at a time.
       </p>
-      {misses > 0 && (
-        <p className="footnote">
-          {misses} of {batch.length} measured requests missed the row cache and include database time. A server with
-          several instances keeps one cache per instance.
-        </p>
-      )}
       {usesFallback && (
         <p className="footnote">
           <Term term="timingSource">Some timings were measured around fetch()</Term>

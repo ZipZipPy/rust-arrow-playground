@@ -32,9 +32,10 @@ curl -fsSL https://raw.githubusercontent.com/ZipZipPy/rust-arrow-playground/main
 [`github-setup.sh`](github-setup.sh) creates a workload identity pool
 `github` whose provider only accepts workflow runs of this repository
 (matched by its numeric id) on `main`, and a service account
-`github-deployer` those runs may impersonate, with Editor, Project IAM
-Admin, Secret Manager Admin and Service Account Admin on the project. Use a
-project dedicated to the playground. The script ends with a line such as
+`github-deployer` those runs may impersonate, with Editor, Cloud Run
+Admin, Project IAM Admin, Secret Manager Admin and Service Account Admin on
+the project. Use a project dedicated to the playground. The script ends
+with a line such as
 `GCP_PROJECT_ID=my-project GCP_PROJECT_NUMBER=123456789012`: put both
 values in [`github.env`](github.env) on `main`, or set them as repository
 variables of the same names.
@@ -500,7 +501,7 @@ How the traffic flows, and why that is realistic:
 - **The database stays in one region.** A far service's database queries
   cross regions too. Compare servers in the UI therefore always uses the
   server row cache and primes each round with one unrecorded request, so
-  the measured requests are cache hits, which never wait for the database
+  the measured requests are cache hits, which do not wait for the database
   (see `docs/DESIGN.md`). Their *DB* part is only the cache lookup on every
   server, and the times show the distance between the browser and each
   server: compare the RTT column and the *Network wait* and *Download*

@@ -281,13 +281,16 @@ environment variable shown.
 The row cache (`cache=true`) is an LRU bounded by both `CACHE_ENTRIES` results
 and `CACHE_MAX_ROWS` rows in total (a cached row with all 20 columns takes
 roughly 0.8 KB); a result larger than `CACHE_MAX_ROWS` is not cached. Each
-entry records the seed generation (`seed_status.started_at`). A hit never
-waits for the database (no pool checkout, no query): its DB time is the
+entry records the seed generation (`seed_status.started_at`). A hit does
+not wait for the database (no pool checkout, no query): its DB time is the
 lookup, so a server far from its database answers hits as fast as a near
 one. At most once a second, a hit also starts a background re-read of the
 generation, which drops the whole cache if the data was re-seeded; a miss
-reads it inline before its rows. So after a re-seed while the app runs,
-hits may serve rows of the old tables for about a second, never longer.
+reads it inline before its rows. So while requests keep coming, hits may
+serve rows of the old tables for about a second after a re-seed. When the
+generation has not been read for five minutes (the server sat idle), the
+next hit reads it inline first, like a miss: that one hit waits for the
+database, and a re-seed during the quiet spell is never served stale.
 
 Logging via `RUST_LOG` (default `info`). On startup the server waits for the
 database, creates every missing relation of every dataset (empty tables, the
@@ -778,9 +781,10 @@ Manager secret named after `SERVICE`). `deploy.sh`, `pause.sh` and
 - Connections: at most `DB_POOL_SIZE × RUN_MAX_INSTANCES × regions` (8 × 2 ×
   3 = 48) plus the seed job, against `max_connections` 500 at 16 GiB.
 
-The row cache makes the shared database fair to far regions: a cache hit
-never waits for the database (see `playground serve`), so Compare servers
-times the same work on every server.
+The row cache makes the shared database fair to far regions: cache hits do
+not wait for the database (see `playground serve`), so Compare servers
+times the same work on every server. The one hit that does, the first after
+five idle minutes, is the unrecorded request that primes each round.
 
 Measured locally: a 1,000,000-row, 20-column request peaks at about 1.4 GiB
 RSS (≈0.8 GB of fetched rows plus the 435 MB JSON body); the binary uses

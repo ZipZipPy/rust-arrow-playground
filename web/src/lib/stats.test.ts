@@ -196,6 +196,20 @@ describe('summarizeByServer', () => {
     expect(far?.arrowSpeedup).toBeCloseTo(600 / 220);
   });
 
+  it('counts the requests each server did not answer from its row cache', () => {
+    const items = [
+      makeMeasurement({ kind: 'servers', target: 'near', cache: 'hit' }),
+      makeMeasurement({ kind: 'servers', target: 'far', cache: 'hit' }),
+      makeMeasurement({ kind: 'servers', target: 'near', cache: 'hit' }),
+      makeMeasurement({ kind: 'servers', target: 'far', cache: 'miss' }),
+      makeMeasurement({ kind: 'servers', target: 'far', cache: null }),
+    ];
+    expect(summarizeByServer(items).map((s) => [s.target, s.cacheMisses])).toEqual([
+      ['near', 0],
+      ['far', 2],
+    ]);
+  });
+
   it('names no fastest format and no Arrow vs JSON ratios until there is something to compare', () => {
     const [only] = summarizeByServer([at('same origin', null, 'parquet', 30, 200)]);
     expect(only).toMatchObject({ fastest: null, arrowSpeedup: null, arrowSize: null });

@@ -22,7 +22,7 @@ use playground::config::{ExportConfig, ServerInfo};
 use playground::encode::{self, ArrowContainer, CancelFlag, Encoding, Format, IpcCompression};
 use playground::query::RowsQuery;
 use playground::schema::{DATASETS, Dataset, ORDER_LINES, ORDERS, ORDERS_COLUMNS};
-use playground::server::{self, AppState, SEED_CHECK_INTERVAL, Settings};
+use playground::server::{self, AppState, SEED_CHECK_INTERVAL, SEED_CHECK_MAX_AGE, Settings};
 use playground::{db, export, seed};
 use serde_json::{Value, json};
 use tokio::sync::MutexGuard;
@@ -97,18 +97,28 @@ async fn app() -> Option<TestApp> {
 }
 
 fn router_with(database: &tokio_postgres::Config, static_dir: &Path, pool_size: usize) -> Router {
+    router_from(database, static_dir, pool_size, settings())
+}
+
+fn router_from(
+    database: &tokio_postgres::Config,
+    static_dir: &Path,
+    pool_size: usize,
+    settings: Settings,
+) -> Router {
     let pool = db::create_pool(database.clone(), pool_size).unwrap();
-    let state = AppState::new(
-        pool,
-        Settings {
-            max_rows: MAX_ROWS,
-            cache_entries: 4,
-            cache_max_rows: 10_000,
-            seed_check_interval: SEED_CHECK_INTERVAL,
-            server_info: ServerInfo::from_env(),
-        },
-    );
-    server::router(state, static_dir)
+    server::router(AppState::new(pool, settings), static_dir)
+}
+
+fn settings() -> Settings {
+    Settings {
+        max_rows: MAX_ROWS,
+        cache_entries: 4,
+        cache_max_rows: 10_000,
+        seed_check_interval: SEED_CHECK_INTERVAL,
+        seed_check_max_age: SEED_CHECK_MAX_AGE,
+        server_info: ServerInfo::from_env(),
+    }
 }
 
 fn static_dir() -> PathBuf {
@@ -1312,6 +1322,51 @@ async fn row_cache_hits_do_not_wait_for_the_database() {
     locker.batch_execute("ROLLBACK").await.unwrap();
     let unblocked = blocked.await.unwrap();
     assert_eq!(unblocked.status, StatusCode::OK);
+}
+
+/// After a quiet spell longer than the max age, the first hit reads the
+/// seed generation again before it is served, so it cannot serve rows of a
+/// seed that finished meanwhile; with the rows unchanged it is still a hit.
+#[tokio::test]
+async fn row_cache_rereads_the_seed_after_a_quiet_spell() {
+    let Some(app) = app().await else { return };
+    let max_age = Duration::from_millis(500);
+    let router = router_from(
+        &app.database,
+        &static_dir(),
+        2,
+        Settings {
+            // No background re-read: only the max age can notice a seed.
+            seed_check_interval: Duration::from_secs(3600),
+            seed_check_max_age: max_age,
+            ..settings()
+        },
+    );
+    let uri = "/api/data?rows=200&offset=2345&columns=id&cache=true";
+    let first = send(&router, Method::GET, uri, &[]).await;
+    assert_eq!(first.header("x-cache"), "miss");
+
+    tokio::time::sleep(max_age).await;
+    let unchanged = send(&router, Method::GET, uri, &[]).await;
+    assert_eq!(unchanged.header("x-cache"), "hit");
+    assert_eq!(unchanged.body, first.body);
+
+    app.client()
+        .await
+        .execute(
+            "UPDATE seed_status SET finished_at = clock_timestamp()",
+            &[],
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(max_age).await;
+    let reseeded = send(&router, Method::GET, uri, &[]).await;
+    assert_eq!(reseeded.header("x-cache"), "miss");
+    assert_eq!(reseeded.body, first.body);
+    assert_eq!(
+        send(&router, Method::GET, uri, &[]).await.header("x-cache"),
+        "hit"
+    );
 }
 
 /// A request abandoned while its query waits must not leave that query

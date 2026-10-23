@@ -138,6 +138,8 @@ export interface ServerSummary {
   arrowSpeedup: number | null;
   /** Arrow IPC's median wire bytes as a fraction of JSON's. */
   arrowSize: number | null;
+  /** Requests the server did not answer from its row cache: their times include the database. */
+  cacheMisses: number;
 }
 
 /** Groups by server (target), in the order servers first appear, then by format. */
@@ -158,6 +160,7 @@ export function summarizeByServer(items: readonly Measurement[]): ServerSummary[
       fastest: formats.length > 1 ? (fastest?.format ?? null) : null,
       arrowSpeedup: json && arrow ? speedup(json.endToEnd.median, arrow.endToEnd.median) : null,
       arrowSize: json && arrow ? ratio(arrow.wireBytes, json.wireBytes) : null,
+      cacheMisses: list.filter((m) => m.cache !== 'hit').length,
     };
   });
 }
