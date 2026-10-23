@@ -1,34 +1,31 @@
 #!/usr/bin/env bash
 # Deletes everything deploy.sh created, so nothing keeps billing.
 #
-#   PROJECT_ID=my-project REGION=asia-southeast1 deploy/gcp/teardown.sh
+#   PROJECT_ID=my-project REGIONS="asia-southeast3 asia-southeast1 us-central1" deploy/gcp/teardown.sh
 #
-# Uses the same variables and defaults as deploy.sh. Asks for confirmation
-# unless YES=1. Resources that do not exist are skipped. Enabled APIs are
-# left on (they cost nothing).
+# Uses the same variables and defaults as deploy.sh (config.sh). Deletes the
+# service in every region of REGIONS and in any other region where the
+# project has a service with the same name. Asks for confirmation unless
+# YES=1. Resources that do not exist are skipped. Enabled APIs are left on
+# (they cost nothing).
 set -euo pipefail
 
-: "${PROJECT_ID:?Set PROJECT_ID to the Google Cloud project to clean up}"
-REGION="${REGION:-asia-southeast1}"
-SERVICE="${SERVICE:-arrow-playground}"
-SEED_JOB="${SEED_JOB:-${SERVICE}-seed}"
-AR_REPO="${AR_REPO:-arrow-playground}"
-RUNTIME_SA_NAME="${RUNTIME_SA_NAME:-${SERVICE}}"
-SQL_INSTANCE="${SQL_INSTANCE:-arrow-playground-pg}"
-DB_SECRET="${DB_SECRET:-${SERVICE}-database-url}"
-RUNTIME_SA="${RUNTIME_SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
+# shellcheck source=SCRIPTDIR/config.sh
+source "$(dirname "${BASH_SOURCE[0]}")/config.sh"
 
-export CLOUDSDK_CORE_PROJECT="$PROJECT_ID"
 # Deletions below run without per-command prompts; the one prompt is here.
 export CLOUDSDK_CORE_DISABLE_PROMPTS=1
 
+check_sql_instance
+mapfile -t regions < <(service_regions)
+
 cat >&2 <<EOF
 This permanently deletes, in project $PROJECT_ID:
-  Cloud Run service   $SERVICE ($REGION)
-  Cloud Run job       $SEED_JOB ($REGION)
+  Cloud Run service   $SERVICE (${regions[*]})
+  Cloud Run job       $SEED_JOB ($SQL_REGION)
   Cloud SQL instance  $SQL_INSTANCE, with all its data
   Secret              $DB_SECRET
-  Artifact Registry   $AR_REPO ($REGION), with all images
+  Artifact Registry   $AR_REPO ($SQL_REGION), with all images
   Service account     $RUNTIME_SA
 EOF
 if [[ "${YES:-}" != 1 ]]; then
@@ -36,20 +33,21 @@ if [[ "${YES:-}" != 1 ]]; then
   [[ "$answer" == "$PROJECT_ID" ]] || { echo "Aborted." >&2; exit 1; }
 fi
 
-log() { printf '\n==> %s\n' "$*" >&2; }
-exists() { "$@" >/dev/null 2>&1; }
+for region in "${regions[@]}"; do
+  if exists gcloud run services describe "$SERVICE" --region="$region"; then
+    log "Deleting Cloud Run service $SERVICE in $region"
+    gcloud run services delete "$SERVICE" --region="$region"
+  fi
+done
 
-if exists gcloud run services describe "$SERVICE" --region="$REGION"; then
-  log "Deleting Cloud Run service $SERVICE"
-  gcloud run services delete "$SERVICE" --region="$REGION"
-fi
-
-if exists gcloud run jobs describe "$SEED_JOB" --region="$REGION"; then
+if exists gcloud run jobs describe "$SEED_JOB" --region="$SQL_REGION"; then
   log "Deleting Cloud Run job $SEED_JOB"
-  gcloud run jobs delete "$SEED_JOB" --region="$REGION"
+  gcloud run jobs delete "$SEED_JOB" --region="$SQL_REGION"
 fi
 
-if exists gcloud sql instances describe "$SQL_INSTANCE"; then
+if [[ -n "$SQL_EXISTS" ]]; then
+  # A deploy.sh that stopped early can leave the creation still running.
+  wait_for_sql
   log "Deleting Cloud SQL instance $SQL_INSTANCE"
   gcloud sql instances delete "$SQL_INSTANCE"
 fi
@@ -59,9 +57,9 @@ if exists gcloud secrets describe "$DB_SECRET"; then
   gcloud secrets delete "$DB_SECRET"
 fi
 
-if exists gcloud artifacts repositories describe "$AR_REPO" --location="$REGION"; then
+if exists gcloud artifacts repositories describe "$AR_REPO" --location="$SQL_REGION"; then
   log "Deleting Artifact Registry repository $AR_REPO"
-  gcloud artifacts repositories delete "$AR_REPO" --location="$REGION"
+  gcloud artifacts repositories delete "$AR_REPO" --location="$SQL_REGION"
 fi
 
 if exists gcloud iam service-accounts describe "$RUNTIME_SA"; then

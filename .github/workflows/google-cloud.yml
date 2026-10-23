@@ -1,0 +1,89 @@
+# Deploys, pauses, resumes or tears down the Google Cloud setup in deploy/gcp/:
+# one Cloud Run service per region, all sharing one Cloud SQL database.
+#
+# Started by hand (Actions -> Google Cloud -> Run workflow) from main. It
+# signs in to Google Cloud without a stored key, through the workload
+# identity pool that deploy/gcp/github-setup.sh creates once; that pool only
+# accepts runs of this repository's main branch. The project comes from the
+# GCP_PROJECT_ID and GCP_PROJECT_NUMBER repository variables, or from
+# deploy/gcp/github.env when they are not set.
+name: Google Cloud
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: What to do
+        type: choice
+        options: [deploy, pause, resume, teardown]
+        default: deploy
+      regions:
+        description: Cloud Run regions, nearest first, separated by spaces (e.g. asia-southeast3 asia-southeast1 us-central1); keep the same first region for pause, resume and teardown
+        type: string
+        required: true
+      seed_rows:
+        description: Orders to generate when the database is empty (deploy only)
+        type: string
+        default: '5000000'
+
+permissions:
+  contents: read
+  id-token: write
+
+# One run at a time: two deploys racing on the same project would fight over
+# the same resources.
+concurrency:
+  group: google-cloud
+  cancel-in-progress: false
+
+jobs:
+  run:
+    name: ${{ inputs.action }} (${{ inputs.regions }})
+    runs-on: ubuntu-latest
+    # Cloud SQL creation, the image build and the first seed take most of it.
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Read the project settings
+        id: project
+        env:
+          VAR_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+          VAR_PROJECT_NUMBER: ${{ vars.GCP_PROJECT_NUMBER }}
+        run: |
+          # shellcheck disable=SC1091
+          source deploy/gcp/github.env
+          project_id="${VAR_PROJECT_ID:-${GCP_PROJECT_ID:-}}"
+          project_number="${VAR_PROJECT_NUMBER:-${GCP_PROJECT_NUMBER:-}}"
+          if [[ -z "$project_id" || -z "$project_number" ]]; then
+            echo "::error::No Google Cloud project yet: run deploy/gcp/github-setup.sh once, then set GCP_PROJECT_ID and GCP_PROJECT_NUMBER (repository variables or deploy/gcp/github.env)."
+            exit 1
+          fi
+          {
+            echo "id=$project_id"
+            echo "provider=projects/$project_number/locations/global/workloadIdentityPools/github/providers/github"
+            echo "service_account=github-deployer@$project_id.iam.gserviceaccount.com"
+          } >>"$GITHUB_OUTPUT"
+
+      - uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ steps.project.outputs.provider }}
+          service_account: ${{ steps.project.outputs.service_account }}
+
+      - uses: google-github-actions/setup-gcloud@v3
+
+      - name: ${{ inputs.action }}
+        env:
+          ACTION: ${{ inputs.action }}
+          PROJECT_ID: ${{ steps.project.outputs.id }}
+          REGIONS: ${{ inputs.regions }}
+          SEED_ROWS: ${{ inputs.seed_rows }}
+        run: |
+          case "$ACTION" in
+            deploy) deploy/gcp/deploy.sh ;;
+            pause) deploy/gcp/pause.sh off ;;
+            resume) deploy/gcp/pause.sh on ;;
+            # No terminal to type the confirmation into: choosing the
+            # action in the run form is the confirmation.
+            teardown) YES=1 deploy/gcp/teardown.sh ;;
+          esac

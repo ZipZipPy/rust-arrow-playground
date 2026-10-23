@@ -66,8 +66,10 @@ rejects).
 ├── web/                       Vite + React + TypeScript frontend
 ├── Dockerfile                 one image: server binary + built frontend
 ├── docker-compose.yml         db + seed + app
-├── deploy/gcp/                GCP deployment notes and scripts (later step)
-├── .github/workflows/ci.yml
+├── deploy/gcp/                Cloud Run per region + one Cloud SQL: deploy.sh,
+│                              pause.sh, teardown.sh (config.sh shared),
+│                              github-setup.sh, TUTORIAL.md for Cloud Shell
+├── .github/workflows/         ci.yml, google-cloud.yml
 ├── docs/DESIGN.md             this file
 └── README.md
 ```
@@ -279,10 +281,13 @@ environment variable shown.
 The row cache (`cache=true`) is an LRU bounded by both `CACHE_ENTRIES` results
 and `CACHE_MAX_ROWS` rows in total (a cached row with all 20 columns takes
 roughly 0.8 KB); a result larger than `CACHE_MAX_ROWS` is not cached. Each
-entry records the seed generation (`seed_status.started_at`); a hit first
-re-reads it with one tiny query (counted as DB time) and drops the whole cache
-if the data was re-seeded since, so a re-seed while the app runs never serves
-rows from the old tables.
+entry records the seed generation (`seed_status.started_at`). A hit never
+waits for the database (no pool checkout, no query): its DB time is the
+lookup, so a server far from its database answers hits as fast as a near
+one. At most once a second, a hit also starts a background re-read of the
+generation, which drops the whole cache if the data was re-seeded; a miss
+reads it inline before its rows. So after a re-seed while the app runs,
+hits may serve rows of the old tables for about a second, never longer.
 
 Logging via `RUST_LOG` (default `info`). On startup the server waits for the
 database, creates every missing relation of every dataset (empty tables, the
@@ -580,6 +585,8 @@ to Arrow), and small decompressors registered in Arrow's
 - `npm run build`: output in `web/dist`, served by the Rust server.
 - API base URL is a UI setting (default: same origin, saved in
   `localStorage`) so a local UI can target a remote Cloud Run server.
+- `npm run build` warns above 640 kB per chunk (`chunkSizeWarningLimit`);
+  the main chunk is about 510 kB, most of it `apache-arrow`.
 
 ### Settings
 
@@ -604,6 +611,24 @@ to Arrow), and small decompressors registered in Arrow's
   the same work) or `One column` (sums one numeric column: the columnar fast
   path that Arrow enables, where JS objects are never built).
 - Iterations (1–20) and an optional warm-up run.
+- **Servers** (Connection panel, behind the server chip): the list Compare
+  servers runs against, saved in `localStorage` as `rap.servers.v1`
+  (`[{base, label?, selected}]`, parsed defensively). "This server" (base
+  `''`, the page's own origin) is always first; a saved URL of the page's own
+  origin counts as This server. Add a URL with an optional label (adding a
+  listed server ticks it, and a non-empty label replaces its label), remove,
+  tick. Each server shows its `/api/info` state, its label (user label, else
+  `server.region`, else the host; "This server (region)" for the origin) and,
+  when ticked, its RTT (median of 5 `/api/ping`). `/api/info` and the pings
+  time out after 15 s ("no answer within 15 s"); "Check again" restarts the
+  check. List RTT pings in flight stop while a run starts and resume after.
+- **`?servers=` link**: `?servers=URL,URL,...` holds absolute base URLs,
+  each normalized like the API base URL; entries that are not http(s) URLs
+  are listed as skipped in the panel. The import adds the servers
+  (deduplicated), ticks exactly the ones listed (This server only if the
+  link lists the page's own origin), opens the panel, and removes the
+  parameter with `history.replaceState` once at least one server was added.
+  `deploy/gcp/deploy.sh` prints such a link.
 
 ### Actions
 
@@ -621,6 +646,25 @@ to Arrow), and small decompressors registered in Arrow's
   callout on the last run only pairs runs with the same dataset, rows,
   columns, HTTP compression, cache, offset mode and Touch data, and otherwise
   lists what differs.
+- **Compare servers**: the Compare above against every ticked server that
+  answers (at least two; ticked servers that do not answer are left out with
+  a note, and the button waits while one is still loading). It uses the
+  current dataset, rows, columns, transport, format options and Touch data,
+  but always `cache=true`. It does not need the API base server: when that
+  one does not answer, the settings follow the first ticked server that
+  does. Before any data request it re-reads `/api/info` from each server and
+  refuses, naming the server, when one is unreachable, has no complete seed,
+  lacks the dataset or columns, has a lower `max_rows`, has no rows after a
+  fixed start id, or would return more than 1% fewer rows than the one with
+  the most (estimated as `min(rows, (max_key − start) × min(1, row_estimate /
+  max_key))`). Then it measures each server's RTT, one server at a time.
+  Plan: with warm-up on, every server warms up all three formats at one
+  shared start id; each round visits the servers in rotating order and, per
+  server, primes the round's rows when that server has not fetched them yet,
+  then requests JSON, Arrow and Parquet in rotating order. Every request of a
+  round, on every server and in every format, reads the same rows; random
+  start ids come from the smallest `max_key` across servers. An error names
+  the server ("<label> (<host>): <message>"). Stop cancels it like Run.
 - **Server benchmark**: calls `/api/bench` and shows encode time and size per variant.
 
 ### Measurements per request
@@ -639,6 +683,12 @@ to Arrow), and small decompressors registered in Arrow's
 | client use | per the Touch data setting: every value of every selected column (default), or the sum of one numeric column; the same work in every format |
 | end to end | start of fetch → end of "use" |
 
+Every measurement also records its `target` (the base URL's host, plus its
+path when it has one) and `region` (`server.region` from that server's
+`/api/info`, or null). History shows both, and the CSV/Markdown export has a
+`region` column after `target`. Compare servers measurements have the kind
+`servers` (badge "srv") and are grouped by `target`.
+
 ### Results views
 
 - Last run: stacked time bar (DB, encode, compress, network wait, download,
@@ -650,6 +700,16 @@ to Arrow), and small decompressors registered in Arrow's
 - History of all runs with Clear and Copy-as-CSV/Markdown.
 - Data preview of the first 20 rows of the last result.
 - Server benchmark table with bars.
+- Servers card (Compare servers): dataset, rows × columns, servers, rounds,
+  HTTP compression and Touch data; a note that the rows came from the primed
+  row cache; per-server stacked phase bars on one shared scale; and a table
+  with one row per server (label, region and host, RTT) and per format the
+  median end-to-end time, wire bytes and the medians of TTFB, download and
+  decode, the fastest format highlighted, plus Arrow vs JSON speed-up and
+  size ratio. When the servers returned different row counts, the subtitle
+  shows the range and the times are flagged as not directly comparable. A
+  footnote counts measured requests that missed the row cache (a service
+  with several instances has one cache per instance).
 
 ## Docker and compose
 
@@ -670,11 +730,57 @@ runtime stage is a slim image with `/app/playground` and `/app/static`,
 GitHub Actions: Rust job (fmt, clippy `-D warnings`, tests with a Postgres
 service), web job (`npm ci`, typecheck, build), Docker build job (no push).
 
-## GCP (later step)
+`google-cloud.yml` (started by hand, `workflow_dispatch` on `main`) runs
+`deploy/gcp/deploy.sh`, `pause.sh off|on` or `teardown.sh` (with `YES=1`)
+for the given `regions`. It authenticates with `google-github-actions/auth`
+through Workload Identity Federation: pool `github`, provider `github`, and
+service account `github-deployer@PROJECT_ID.iam.gserviceaccount.com`, all
+created by `deploy/gcp/github-setup.sh`, whose provider only accepts tokens
+of this repository (by `repository_id`) on `refs/heads/main`. The project
+comes from the `GCP_PROJECT_ID` / `GCP_PROJECT_NUMBER` repository variables,
+else from `deploy/gcp/github.env`. A deploy writes the region URLs and the
+compare link to the run summary.
 
-`deploy/gcp/` documents Artifact Registry, Cloud SQL for PostgreSQL, a Cloud
-Run service (`DATABASE_URL=host=/cloudsql/...`), a Cloud Run Job for seeding,
-and recommended sizing (memory for 1M-row JSON responses).
+## GCP
+
+`deploy/gcp/` deploys the image to Cloud Run with the data in Cloud SQL for
+PostgreSQL 18 (`DATABASE_URL=host=/cloudsql/...`, the whole string a Secret
+Manager secret named after `SERVICE`). `deploy.sh`, `pause.sh` and
+`teardown.sh` share their settings through `config.sh`:
+
+- `REGIONS` (spaces or commas; `REGION` is the single-region form and the
+  default, `asia-southeast1`): one Cloud Run service per region, all named
+  `SERVICE`, each with `REGION=<its region>` (reported as `server.region`).
+- `SQL_REGION`: the one Cloud SQL instance, the Artifact Registry repository
+  and the seed job. Defaults to the first region, except where Cloud SQL
+  cannot create the default 4 vCPU / 16 GiB machine (`sql_region_for`: today
+  only `asia-southeast3` → `asia-southeast1`). Every service connects to the
+  instance through the Cloud SQL connector, across regions where needed. An
+  existing instance never moves: the scripts stop before creating anything
+  when it, or the secret's instance, is not where the settings say.
+- `deploy.sh`: enables the APIs, starts creating Cloud SQL (`--async`), builds
+  the image once meanwhile (`BUILDER=cloud-build|docker|none`; `none` deploys
+  `IMAGE` without building), waits for unfinished Cloud SQL operations and
+  stops with the creation error unless the instance is `RUNNABLE`, creates
+  the database, user, secret and runtime service account, runs the seed job
+  (`seed --if-empty`, `SEED_ROWS` default 5,000,000, about 4.3 GB;
+  `SQL_STORAGE_GB` 50 with storage auto-increase), then deploys every region
+  with `--min=RUN_MIN_INSTANCES --min-instances=default`. It ends with each
+  region's URL and the compare link `<first>/?servers=<url1>,<url2>,...`.
+- `pause.sh off` sets the service-level minimum to 0 everywhere and stops
+  Cloud SQL (activation policy `NEVER`); `pause.sh on` reverses it. Neither
+  deploys a revision.
+- `teardown.sh` deletes every regional service, the job, the repository, the
+  instance, the secret and the runtime service account; it asks for the
+  project id unless `YES=1`.
+- `pause.sh` and `teardown.sh` also reach services named `SERVICE` in
+  regions missing from `REGIONS`.
+- Connections: at most `DB_POOL_SIZE × RUN_MAX_INSTANCES × regions` (8 × 2 ×
+  3 = 48) plus the seed job, against `max_connections` 500 at 16 GiB.
+
+The row cache makes the shared database fair to far regions: a cache hit
+never waits for the database (see `playground serve`), so Compare servers
+times the same work on every server.
 
 Measured locally: a 1,000,000-row, 20-column request peaks at about 1.4 GiB
 RSS (≈0.8 GB of fetched rows plus the 435 MB JSON body); the binary uses
