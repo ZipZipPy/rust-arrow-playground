@@ -92,6 +92,8 @@ disk (mostly the Rust build image and build cache), and 4 GB of memory for
 1M-row requests.
 
 ```sh
+git clone https://github.com/ZipZipPy/rust-arrow-playground.git
+cd rust-arrow-playground
 docker compose up --build
 ```
 
@@ -104,6 +106,7 @@ view), and starts the app. Later starts take seconds and keep the data.
 
 | Want to | Do |
 | --- | --- |
+| Run in the background | `make up` (`docker compose up --build --detach`, then waits until the app is healthy) |
 | Use another port | `APP_PORT=9000 docker compose up` |
 | Seed a different row count on first start | `SEED_ROWS=10000000 docker compose up --build` |
 | Re-seed an existing database | `docker compose run --rm seed seed --rows 5000000` |
@@ -129,9 +132,12 @@ automatically), Node.js 26.12.1 (`.nvmrc` / `.node-version`), and a
 PostgreSQL server (18.6 is what the project pins and tests).
 
 ```sh
-# 1. A database (or use `make dev-db`, which runs PostgreSQL in a container on port 5433)
+# 1. A database: your own PostgreSQL...
 createdb playground
 export DATABASE_URL=postgres://postgres:postgres@localhost:5432/playground
+#    ...or PostgreSQL 18.6 in a container on port 5433 (needs Docker)
+make dev-db
+export DATABASE_URL=postgres://postgres:postgres@localhost:5433/playground
 
 # 2. Generate rows and start the API on http://localhost:8080
 cd server
