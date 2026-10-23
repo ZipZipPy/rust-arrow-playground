@@ -650,6 +650,7 @@ fn router(database: &tokio_postgres::Config) -> axum::Router {
             max_rows: 1000,
             cache_entries: 2,
             cache_max_rows: 1000,
+            seed_check_interval: server::SEED_CHECK_INTERVAL,
             server_info: ServerInfo::from_env(),
         },
     );

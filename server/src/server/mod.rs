@@ -9,7 +9,8 @@ mod static_files;
 
 use std::net::SocketAddr;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
@@ -39,8 +40,15 @@ pub struct Settings {
     pub max_rows: u64,
     pub cache_entries: usize,
     pub cache_max_rows: usize,
+    /// How often cache hits re-read the seed generation (in the background).
+    pub seed_check_interval: Duration,
     pub server_info: ServerInfo,
 }
+
+/// See [`Settings::seed_check_interval`]: a re-seed is noticed within about
+/// this long, and back-to-back cache hits cost the database one tiny query
+/// per interval instead of one each.
+pub const SEED_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Clone)]
 pub struct AppState(Arc<Inner>);
@@ -48,6 +56,7 @@ pub struct AppState(Arc<Inner>);
 struct Inner {
     pool: Pool,
     cache: RowCache,
+    seed_check: SeedCheck,
     /// One `/api/bench` at a time: each holds every fetched row plus its
     /// outputs, and runs the machine flat out.
     bench: Arc<Semaphore>,
@@ -68,6 +77,7 @@ impl AppState {
         Self(Arc::new(Inner {
             pool,
             cache: RowCache::new(settings.cache_entries, settings.cache_max_rows),
+            seed_check: SeedCheck::new(settings.seed_check_interval),
             bench: Arc::new(Semaphore::new(1)),
             max_rows: settings.max_rows,
             server_info: settings.server_info,
@@ -97,15 +107,27 @@ impl AppState {
 
     /// Reads the rows of `query`, from the cache when `use_cache` allows.
     ///
-    /// With the cache, the seed generation is read first (one tiny query,
-    /// counted as DB time) and the whole cache dropped if the data was
-    /// re-seeded since its entries were read.
+    /// A cache hit never waits for the database, so its DB time is only the
+    /// lookup, even on a server far from the database. It is served from
+    /// the generation seen last and, at most once per
+    /// [`Settings::seed_check_interval`], starts a background re-read of the
+    /// seed generation that drops the whole cache if the data was re-seeded.
+    /// A miss reads the generation before its rows, as before.
     pub async fn load_rows(
         &self,
         query: RowsQuery,
         use_cache: bool,
     ) -> Result<LoadedRows, ApiError> {
         let started = Instant::now();
+        if use_cache && let Some(rows) = self.0.cache.get(&query) {
+            self.check_seed_in_background();
+            return Ok(LoadedRows {
+                rows,
+                db_time: started.elapsed(),
+                cache: CacheStatus::Hit,
+            });
+        }
+
         let client = GuardedClient::new(self.0.pool.get().await?);
         if !use_cache {
             let fetched = db::fetch_rows(&client, &query).await;
@@ -119,8 +141,8 @@ impl AppState {
             });
         }
 
-        let status = db::seed_status(&client).await;
-        let generation = match status {
+        self.0.seed_check.started();
+        let generation = match db::seed_status(&client).await {
             Ok(status) => status.map(|status| status.generation()),
             Err(err) => {
                 client.release();
@@ -128,14 +150,6 @@ impl AppState {
             }
         };
         drop_in_background(self.0.cache.sync_generation(generation));
-        if let Some(rows) = self.0.cache.get(&query) {
-            client.release();
-            return Ok(LoadedRows {
-                rows,
-                db_time: started.elapsed(),
-                cache: CacheStatus::Hit,
-            });
-        }
         let fetched = db::fetch_rows(&client, &query).await;
         client.release();
         let rows = Arc::new(fetched?);
@@ -146,6 +160,70 @@ impl AppState {
             db_time,
             cache: CacheStatus::Miss,
         })
+    }
+
+    /// Re-reads the seed generation off the request path, unless that was
+    /// done within the interval or is still running.
+    fn check_seed_in_background(&self) {
+        if !self.0.seed_check.try_begin() {
+            return;
+        }
+        let state = self.clone();
+        tokio::spawn(async move {
+            let result = async {
+                let client = GuardedClient::new(state.0.pool.get().await?);
+                let status = db::seed_status(&client).await;
+                client.release();
+                Ok::<_, ApiError>(status?.map(|status| status.generation()))
+            }
+            .await;
+            // A failure is logged where the error is made; a hit after the
+            // next interval tries again.
+            if let Ok(generation) = result {
+                drop_in_background(state.0.cache.sync_generation(generation));
+            }
+            state.0.seed_check.end();
+        });
+    }
+}
+
+/// When the seed generation was last read for the row cache, and whether a
+/// background read is running.
+struct SeedCheck {
+    interval: Duration,
+    last: Mutex<Option<Instant>>,
+    running: AtomicBool,
+}
+
+impl SeedCheck {
+    fn new(interval: Duration) -> Self {
+        Self {
+            interval,
+            last: Mutex::new(None),
+            running: AtomicBool::new(false),
+        }
+    }
+
+    /// Notes a read that starts now (a miss reads the generation inline).
+    fn started(&self) {
+        *self.last.lock().unwrap_or_else(PoisonError::into_inner) = Some(Instant::now());
+    }
+
+    /// Claims the background read when the last one is older than the
+    /// interval and none is running.
+    fn try_begin(&self) -> bool {
+        let mut last = self.last.lock().unwrap_or_else(PoisonError::into_inner);
+        if last.is_some_and(|at| at.elapsed() < self.interval)
+            || self.running.swap(true, Ordering::AcqRel)
+        {
+            return false;
+        }
+        *last = Some(Instant::now());
+        true
+    }
+
+    fn end(&self) {
+        self.running.store(false, Ordering::Release);
     }
 }
 
@@ -230,6 +308,7 @@ pub async fn run(config: ServeConfig) -> anyhow::Result<()> {
             max_rows: config.max_rows,
             cache_entries: config.cache_entries,
             cache_max_rows: config.cache_max_rows,
+            seed_check_interval: SEED_CHECK_INTERVAL,
             server_info: ServerInfo::from_env(),
         },
     );
