@@ -132,10 +132,14 @@ fi
 if ! exists gcloud secrets describe "$DB_SECRET"; then
   log "Creating database user $DB_USER and secret $DB_SECRET"
   password="$(openssl rand -hex 24)"
+  # gcloud logs every command line, flag values included, under
+  # ~/.config/gcloud/logs; keep the password out of those files.
   if [[ -n "$(gcloud sql users list --instance="$SQL_INSTANCE" --filter="name=$DB_USER" --format='value(name)')" ]]; then
-    gcloud sql users set-password "$DB_USER" --instance="$SQL_INSTANCE" --password="$password"
+    CLOUDSDK_CORE_DISABLE_FILE_LOGGING=1 \
+      gcloud sql users set-password "$DB_USER" --instance="$SQL_INSTANCE" --password="$password"
   else
-    gcloud sql users create "$DB_USER" --instance="$SQL_INSTANCE" --password="$password"
+    CLOUDSDK_CORE_DISABLE_FILE_LOGGING=1 \
+      gcloud sql users create "$DB_USER" --instance="$SQL_INSTANCE" --password="$password"
   fi
   printf 'host=/cloudsql/%s user=%s password=%s dbname=%s' \
     "$CONNECTION_NAME" "$DB_USER" "$password" "$DB_NAME" |

@@ -1,4 +1,4 @@
-import { DATA_FORMATS, type Measurement } from './types';
+import { DATA_FORMATS, type Measurement, USE_SCOPES } from './types';
 
 export const MAX_HISTORY = 500;
 
@@ -19,9 +19,26 @@ function isMeasurement(value: unknown): value is Measurement {
   );
 }
 
+/**
+ * Fills in fields added after a measurement was saved. Earlier versions only
+ * served `orders`, summed one column in the "use" step and did not record the
+ * start-id mode.
+ */
+function upgrade(saved: Measurement): Measurement {
+  const m = saved as Partial<Measurement> & Measurement;
+  return {
+    ...m,
+    dataset: typeof m.dataset === 'string' ? m.dataset : 'orders',
+    offsetMode: m.offsetMode === 'random' ? 'random' : 'fixed',
+    rowCache: typeof m.rowCache === 'boolean' ? m.rowCache : m.cache === 'hit' || m.cache === 'miss',
+    compressMs: typeof m.compressMs === 'number' ? m.compressMs : null,
+    useScope: USE_SCOPES.includes(m.useScope) ? m.useScope : 'column',
+  };
+}
+
 /** Restores history saved by an earlier session, dropping anything malformed. */
 export function parseHistory(raw: unknown): Measurement[] {
-  return Array.isArray(raw) ? raw.filter(isMeasurement).slice(0, MAX_HISTORY) : [];
+  return Array.isArray(raw) ? raw.filter(isMeasurement).slice(0, MAX_HISTORY).map(upgrade) : [];
 }
 
 /** Newest first, capped. */

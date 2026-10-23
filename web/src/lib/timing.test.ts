@@ -14,7 +14,7 @@ const entry: ResourceTimingLike = {
   decodedBodySize: 90_000,
 };
 
-const server = { dbMs: 20, encodeMs: 10, totalMs: 32 };
+const server = { dbMs: 20, encodeMs: 10, compressMs: null, totalMs: 32 };
 
 describe('computeTimings', () => {
   it('uses Resource Timing marks when present', () => {
@@ -44,23 +44,37 @@ describe('computeTimings', () => {
   });
 
   it('never reports negative network wait or other time', () => {
-    const t = computeTimings(marks, entry, { dbMs: 80, encodeMs: 40, totalMs: 130 });
+    const t = computeTimings(marks, entry, { dbMs: 80, encodeMs: 40, compressMs: null, totalMs: 130 });
     expect(t.networkWaitMs).toBe(0);
     expect(t.otherMs).toBe(0);
   });
 
   it('works without any server timing', () => {
-    const t = computeTimings(marks, entry, { dbMs: null, encodeMs: null, totalMs: null });
+    const t = computeTimings(marks, entry, { dbMs: null, encodeMs: null, compressMs: null, totalMs: null });
     expect(t.networkWaitMs).toBe(50);
+  });
+
+  it('counts server-side HTTP compression as its own phase, before the first byte', () => {
+    const t = computeTimings(marks, entry, { dbMs: 20, encodeMs: 10, compressMs: 8, totalMs: 40 });
+    // TTFB 50 includes the 40 ms the server worked, compression included.
+    expect(t.networkWaitMs).toBe(10);
+    expect(t.downloadMs).toBe(45);
+    // 135 - (20 + 10 + 8 + 10 + 45 + 30 + 5)
+    expect(t.otherMs).toBe(7);
+    const noTotal = computeTimings(marks, entry, { dbMs: 20, encodeMs: 10, compressMs: 8, totalMs: null });
+    expect(noTotal.networkWaitMs).toBe(12);
   });
 });
 
 describe('serverTimes', () => {
   it('prefers headers and falls back to the entry serverTiming', () => {
     const headers = readServerHeaders(new Headers({ 'x-db-ms': '5' }));
-    const withTiming = { ...entry, serverTiming: [{ name: 'encode', duration: 7 }, { name: 'total', duration: 13 }] };
-    expect(serverTimes(headers, withTiming)).toEqual({ dbMs: 5, encodeMs: 7, totalMs: 13 });
-    expect(serverTimes(headers, null)).toEqual({ dbMs: 5, encodeMs: null, totalMs: null });
+    const withTiming = {
+      ...entry,
+      serverTiming: [{ name: 'encode', duration: 7 }, { name: 'compress', duration: 1 }, { name: 'total', duration: 13 }],
+    };
+    expect(serverTimes(headers, withTiming)).toEqual({ dbMs: 5, encodeMs: 7, compressMs: 1, totalMs: 13 });
+    expect(serverTimes(headers, null)).toEqual({ dbMs: 5, encodeMs: null, compressMs: null, totalMs: null });
   });
 });
 
@@ -82,8 +96,17 @@ describe('computeSizes', () => {
     expect(computeSizes(null, plain, 1234)).toEqual({ wireBytes: 1234, transferBytes: null, payloadBytes: 1234 });
   });
 
-  it('reports unknown wire size for compressed chunked bodies without an entry', () => {
+  it('reports unknown wire size for compressed chunked bodies without an entry or X-Encoded-Bytes', () => {
     const chunked = readServerHeaders(new Headers({ 'content-encoding': 'br' }));
     expect(computeSizes(null, chunked, 5000).wireBytes).toBeNull();
+  });
+
+  it('falls back to X-Encoded-Bytes, which chunked bodies carry too', () => {
+    const chunked = readServerHeaders(new Headers({ 'content-encoding': 'zstd', 'x-encoded-bytes': '1234', 'x-body-bytes': '5000' }));
+    expect(computeSizes(null, chunked, 5000)).toEqual({ wireBytes: 1234, transferBytes: null, payloadBytes: 5000 });
+    const zeroed = { ...entry, encodedBodySize: 0, transferSize: 0 };
+    expect(computeSizes(zeroed, chunked, 5000).wireBytes).toBe(1234);
+    // Resource Timing wins when it has the size.
+    expect(computeSizes(entry, chunked, 5000).wireBytes).toBe(20_000);
   });
 });

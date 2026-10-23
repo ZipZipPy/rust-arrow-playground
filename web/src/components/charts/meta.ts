@@ -12,6 +12,7 @@ export interface SeriesMeta {
 export const PHASE_META: Record<Phase, SeriesMeta> = {
   db: { label: 'DB', color: 'var(--phase-db)', term: 'db' },
   encode: { label: 'Encode', color: 'var(--phase-encode)', term: 'encode' },
+  compress: { label: 'Compress', color: 'var(--phase-compress)', term: 'compress' },
   network: { label: 'Network wait', color: 'var(--phase-network)', term: 'network' },
   download: { label: 'Download', color: 'var(--phase-download)', term: 'download' },
   decode: { label: 'Decode', color: 'var(--phase-decode)', term: 'decode' },

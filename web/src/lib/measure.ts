@@ -1,5 +1,5 @@
 import { apiUrl, dataParams, errorFromResponse, makeNonce, readServerHeaders } from './api';
-import { type Decoded, type ParquetReader, decodePayload, rowCount, useColumnValue } from './decode';
+import { type Decoded, type ParquetReader, decodePayload, rowCount, useValues } from './decode';
 import {
   type ClientMarks,
   computeSizes,
@@ -62,6 +62,7 @@ export interface MeasuredRequest {
   sizes: Sizes;
   dbMs: number | null;
   encodeMs: number | null;
+  compressMs: number | null;
   serverTotalMs: number | null;
   rowCount: number;
   columnCount: number;
@@ -72,15 +73,17 @@ export interface MeasuredRequest {
 export interface MeasureOptions {
   base: string;
   request: DataRequest;
-  useColumn: string | null;
+  /** The columns the "use" step reads (see `useColumns`). */
+  useColumns: readonly string[];
   parquet: ParquetReader | null;
   signal?: AbortSignal;
 }
 
 /**
  * Fetches one `/api/data` response and times each phase separately:
- * download (`arrayBuffer`), decode (parse / Arrow / Parquet) and use (a pass
- * over one column). Errors from the server are thrown as ApiError.
+ * download (`arrayBuffer`), decode (parse / Arrow / Parquet) and use (one
+ * read of every value of `useColumns`). Errors from the server are thrown as
+ * ApiError.
  */
 export async function measureRequest(opts: MeasureOptions): Promise<MeasuredRequest> {
   prepareResourceTimingBuffer();
@@ -95,7 +98,7 @@ export async function measureRequest(opts: MeasureOptions): Promise<MeasuredRequ
   const bytes = new Uint8Array(buffer);
   const decoded = decodePayload(opts.request.format, bytes, opts.parquet);
   const decodedAt = performance.now();
-  const useValue = useColumnValue(decoded, opts.useColumn);
+  const useValue = useValues(decoded, opts.useColumns);
   const usedAt = performance.now();
 
   const marks: ClientMarks = { start, headers: headersAt, body: bodyAt, decoded: decodedAt, used: usedAt };
@@ -112,12 +115,20 @@ export async function measureRequest(opts: MeasureOptions): Promise<MeasuredRequ
     sizes: computeSizes(entry, headers, bytes.byteLength),
     dbMs: server.dbMs,
     encodeMs: server.encodeMs,
+    compressMs: server.compressMs,
     serverTotalMs: server.totalMs,
     rowCount: rowCount(decoded),
     columnCount,
     useValue,
     decoded,
   };
+}
+
+/** Fetches and drains a response without timing or decoding it (to fill the server row cache). */
+export async function fetchUnmeasured(base: string, request: DataRequest, signal?: AbortSignal): Promise<void> {
+  const response = await fetch(apiUrl(base, 'data', dataParams(request, makeNonce())), { cache: 'no-store', signal });
+  if (!response.ok) throw await errorFromResponse(response);
+  await response.arrayBuffer();
 }
 
 /** One round-trip sample against `/api/ping` (204, empty body). */

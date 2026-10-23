@@ -56,6 +56,7 @@ export function apiUrl(
 /** Query parameters for `/api/data`, limited to the ones the format uses. */
 export function dataParams(req: DataRequest, nonce?: string): URLSearchParams {
   const params = new URLSearchParams();
+  params.set('dataset', req.dataset);
   params.set('format', req.format);
   params.set('rows', String(req.rows));
   if (req.offset > 0) params.set('offset', String(req.offset));
@@ -75,6 +76,7 @@ export function dataParams(req: DataRequest, nonce?: string): URLSearchParams {
 }
 
 export interface BenchParams {
+  dataset: string;
   rows: number;
   offset: number;
   columns: string[] | null;
@@ -83,6 +85,7 @@ export interface BenchParams {
 
 export function benchParams(p: BenchParams, nonce?: string): URLSearchParams {
   const params = new URLSearchParams();
+  params.set('dataset', p.dataset);
   params.set('rows', String(p.rows));
   if (p.offset > 0) params.set('offset', String(p.offset));
   if (p.columns !== null) params.set('columns', p.columns.join(','));
@@ -154,12 +157,15 @@ export function readServerHeaders(headers: Headers): ServerHeaders {
   return {
     dbMs: numberHeader(headers, 'x-db-ms') ?? timing.db ?? null,
     encodeMs: numberHeader(headers, 'x-encode-ms') ?? timing.encode ?? null,
+    compressMs: numberHeader(headers, 'x-compress-ms') ?? timing.compress ?? null,
     totalMs: numberHeader(headers, 'x-total-ms') ?? timing.total ?? null,
     rowCount: numberHeader(headers, 'x-row-count'),
     columnCount: numberHeader(headers, 'x-column-count'),
     lastId: numberHeader(headers, 'x-last-id'),
     bodyBytes: numberHeader(headers, 'x-body-bytes'),
+    encodedBytes: numberHeader(headers, 'x-encoded-bytes'),
     format: headers.get('x-format'),
+    dataset: headers.get('x-dataset'),
     cache: headers.get('x-cache'),
     contentEncoding: headers.get('content-encoding'),
     contentLength: numberHeader(headers, 'content-length'),

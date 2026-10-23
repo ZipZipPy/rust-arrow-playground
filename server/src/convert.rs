@@ -16,14 +16,21 @@ use arrow::error::ArrowError;
 use arrow::record_batch::RecordBatch;
 use tokio_postgres::Row;
 
+use crate::encode::{CancelFlag, Cancelled};
 use crate::pg_time::{Date, Timestamp};
 use crate::schema::{self, Column, ColumnType};
 
 /// Average bytes per text value used to pre-size string buffers.
 const TEXT_BYTES_HINT: usize = 16;
 
+/// Rows between two looks at the cancellation flag while building the
+/// shared dictionaries, which is one pass over every row.
+const CANCEL_CHECK_ROWS: usize = 65_536;
+
 #[derive(Debug, thiserror::Error)]
 pub enum ConvertError {
+    #[error(transparent)]
+    Cancelled(#[from] Cancelled),
     #[error("reading a Postgres value failed: {0}")]
     Postgres(#[from] tokio_postgres::Error),
     #[error("building Arrow arrays failed: {0}")]
@@ -43,6 +50,7 @@ pub fn record_batches(
     columns: &[&'static Column],
     batch_size: usize,
     dictionary: bool,
+    cancel: &CancelFlag,
 ) -> Result<(SchemaRef, Vec<RecordBatch>), ConvertError> {
     assert!(batch_size > 0, "batch_size must be positive");
     let schema = schema::arrow_schema(columns, dictionary);
@@ -50,10 +58,11 @@ pub fn record_batches(
         .iter()
         .map(|column| dictionary && column.dictionary)
         .collect();
-    let dictionaries = shared_dictionaries(rows, &shared)?;
+    let dictionaries = shared_dictionaries(rows, &shared, cancel)?;
 
     let mut batches = Vec::with_capacity(rows.len().div_ceil(batch_size));
     for (chunk_index, chunk) in rows.chunks(batch_size).enumerate() {
+        cancel.check()?;
         let mut builders: Vec<Option<ColumnBuilder>> = columns
             .iter()
             .zip(&shared)
@@ -88,6 +97,7 @@ pub fn record_batches(
 fn shared_dictionaries(
     rows: &[Row],
     shared: &[bool],
+    cancel: &CancelFlag,
 ) -> Result<Vec<Option<DictionaryArray<Int32Type>>>, ConvertError> {
     let mut builders: Vec<Option<StringDictionaryBuilder<Int32Type>>> = shared
         .iter()
@@ -100,7 +110,10 @@ fn shared_dictionaries(
     if builders.iter().all(Option::is_none) {
         return Ok(builders.into_iter().map(|_| None).collect());
     }
-    for row in rows {
+    for (i, row) in rows.iter().enumerate() {
+        if i % CANCEL_CHECK_ROWS == 0 {
+            cancel.check()?;
+        }
         for (idx, builder) in builders.iter_mut().enumerate() {
             let Some(builder) = builder else { continue };
             match row.try_get::<_, Option<&str>>(idx)? {

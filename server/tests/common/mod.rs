@@ -1,9 +1,9 @@
 //! Shared helpers for the database-backed integration tests.
 //!
 //! The tests need `TEST_DATABASE_URL`; without it they print a note and pass.
-//! Each test binary works in its own Postgres schema (via `search_path`), so
-//! binaries never touch each other's `orders` table, and a binary's tests
-//! take [`DB_LOCK`] because they share one table.
+//! Each test binary works in its own Postgres schemas (via `search_path`), so
+//! binaries never touch each other's tables, and a binary's tests take
+//! [`DB_LOCK`] because they share them (and the seed lock is per database).
 
 #![allow(dead_code)]
 
@@ -13,9 +13,10 @@ use arrow::datatypes::{
     TimestampMicrosecondType,
 };
 use arrow::record_batch::RecordBatch;
-use chrono::{DateTime, NaiveDate, SecondsFormat};
+use chrono::{DateTime, NaiveDate, SecondsFormat, Utc};
 use playground::config::{SeedConfig, SeedMode};
 use playground::db;
+use playground::schema::{Column, ColumnType};
 use serde_json::Value;
 
 pub static DB_LOCK: tokio::sync::Mutex<bool> = tokio::sync::Mutex::const_new(false);
@@ -39,6 +40,30 @@ pub async fn database(schema: &str) -> Option<tokio_postgres::Config> {
         .expect("create test schema");
     config.options(format!("-c search_path={schema}"));
     Some(config)
+}
+
+/// Like [`database`], but `schema` is dropped and created empty first.
+pub async fn fresh_database(schema: &str) -> Option<tokio_postgres::Config> {
+    let config = database(schema).await?;
+    let client = db::connect(&config)
+        .await
+        .expect("connect to the test schema");
+    client
+        .batch_execute(&format!(
+            "SET client_min_messages = warning; DROP SCHEMA {schema} CASCADE; CREATE SCHEMA {schema}"
+        ))
+        .await
+        .expect("recreate test schema");
+    Some(config)
+}
+
+/// The single `bigint` that `sql` returns.
+pub async fn count(client: &tokio_postgres::Client, sql: &str) -> i64 {
+    client
+        .query_one(sql, &[])
+        .await
+        .unwrap_or_else(|err| panic!("{sql}: {err}"))
+        .get(0)
 }
 
 pub fn seed_config(database: &tokio_postgres::Config, rows: u64, workers: u16) -> SeedConfig {
@@ -169,5 +194,54 @@ pub fn ipc_message_kinds(stream: &[u8]) -> Vec<arrow::ipc::MessageHeader> {
             .expect("valid IPC message");
         kinds.push(message.header_type());
         position += length + message.bodyLength() as usize;
+    }
+}
+
+/// Asserts that the JSON rows `json` hold what tokio-postgres reads for
+/// `columns` from `rows`: an independent check of the server's own wire
+/// decoders for timestamps, dates and REALs.
+pub fn assert_json_matches_postgres(
+    json: &[Value],
+    rows: &[tokio_postgres::Row],
+    columns: &[Column],
+) {
+    assert_eq!(json.len(), rows.len(), "row count");
+    for (row, (object, db_row)) in json.iter().zip(rows).enumerate() {
+        for (i, column) in columns.iter().enumerate() {
+            let context = format!("column {}, row {row}", column.name);
+            let expected = postgres_value(db_row, i, column.ty);
+            let actual = &object[column.name];
+            match (column.ty, actual.as_f64(), expected.as_f64()) {
+                // JSON prints the shortest text that round-trips the f32.
+                (ColumnType::Float32, Some(actual), Some(expected)) => {
+                    assert_eq!(actual as f32, expected as f32, "{context}");
+                }
+                // `2.0` may be printed as `2`, which parses as an integer.
+                (ColumnType::Float64, Some(actual), Some(expected)) => {
+                    assert_eq!(actual, expected, "{context}");
+                }
+                _ => assert_eq!(actual, &expected, "{context}"),
+            }
+        }
+    }
+}
+
+fn postgres_value(row: &tokio_postgres::Row, i: usize, ty: ColumnType) -> Value {
+    match ty {
+        ColumnType::Int64 => row.get::<_, Option<i64>>(i).into(),
+        ColumnType::Int32 => row.get::<_, Option<i32>>(i).into(),
+        ColumnType::Int16 => row.get::<_, Option<i16>>(i).into(),
+        ColumnType::Float64 => row.get::<_, Option<f64>>(i).into(),
+        ColumnType::Float32 => row.get::<_, Option<f32>>(i).map(f64::from).into(),
+        ColumnType::Boolean => row.get::<_, Option<bool>>(i).into(),
+        ColumnType::Text => row.get::<_, Option<String>>(i).into(),
+        ColumnType::Timestamp => row
+            .get::<_, Option<DateTime<Utc>>>(i)
+            .map(|t| t.to_rfc3339_opts(SecondsFormat::Micros, true))
+            .into(),
+        ColumnType::Date => row
+            .get::<_, Option<NaiveDate>>(i)
+            .map(|d| d.format("%Y-%m-%d").to_string())
+            .into(),
     }
 }

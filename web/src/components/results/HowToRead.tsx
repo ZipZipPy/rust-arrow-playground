@@ -25,7 +25,7 @@ export function HowToRead({ defaultOpen }: { defaultOpen: boolean }) {
             <p>
               Data is sent column by column in the same binary layout it has in memory. The browser wraps those bytes as
               typed arrays (for example a <code>Float64Array</code> of prices) with almost no work, so decoding is close
-              to free and scanning a column is fast.
+              to free and scanning a column is fast. Strings and 64-bit numbers become JavaScript values only when read.
             </p>
           </div>
           <div>
@@ -38,10 +38,22 @@ export function HowToRead({ defaultOpen }: { defaultOpen: boolean }) {
           </div>
         </div>
         <p>
-          <strong>Where it matters:</strong> on a fast local network, decode time dominates and Arrow wins by skipping
-          parsing. Over the internet, bytes dominate: HTTP compression shrinks JSON a lot, but Arrow and Parquet still send
-          fewer bytes and the browser still avoids parsing text. Run Compare locally and against a remote server to see
-          both effects.
+          <strong>Decode vs use:</strong> JSON builds every value while it parses; Arrow builds a value only when it is
+          read. With <em>Touch data: Every value</em> (the default) every format ends up building every selected value,
+          so the end-to-end numbers compare the same work, as for a table view or an export. With <em>One column</em>{' '}
+          only one column is read, the column scan (a sum, a chart) where Arrow skips nearly all the work. Compare
+          decode + use, not decode alone.
+        </p>
+        <p>
+          <strong>Where it matters:</strong> on a fast local network, the browser’s work and the server’s encoding
+          dominate. Over the internet, bytes dominate: HTTP compression shrinks JSON a lot (its cost shows as Compress on
+          the server), but Arrow and Parquet still send fewer bytes and the browser still avoids parsing text. Run Compare
+          locally and against a remote server to see both effects.
+        </p>
+        <p>
+          <strong>Datasets:</strong> a join view or a live aggregate moves time into PostgreSQL, which is the same for
+          every format. The more of the end-to-end time the database takes, the less the format matters; the
+          materialized view shows how precomputing the aggregate gives that time back.
         </p>
         <dl className="glossary">
           {PHASES.map((phase) => (
@@ -64,6 +76,10 @@ export function HowToRead({ defaultOpen }: { defaultOpen: boolean }) {
           <div>
             <dt>Payload</dt>
             <dd>{GLOSSARY.payload}</dd>
+          </div>
+          <div>
+            <dt>Browser work</dt>
+            <dd>{GLOSSARY.browser}</dd>
           </div>
           <div>
             <dt>Speed-up</dt>

@@ -1,13 +1,17 @@
-//! Connection pool, DDL, table statistics and row fetching.
+//! Connections, the seed lock and status, dataset statistics and row
+//! fetching.
 
 use std::time::Duration;
 
 use deadpool_postgres::{Manager, ManagerConfig, Pool, PoolError, RecyclingMethod, Runtime};
+use tokio_postgres::error::SqlState;
 use tokio_postgres::{Client, Config, NoTls, Row};
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 
+use crate::ddl;
+use crate::pg_time::Timestamp;
 use crate::query::RowsQuery;
-use crate::schema::{COLUMNS, ColumnSelection, TABLE};
+use crate::schema::{ColumnSelection, Dataset, Stats};
 
 const APPLICATION_NAME: &str = "rust-arrow-playground";
 /// Prepared statements kept per pooled connection before the cache is reset.
@@ -55,122 +59,309 @@ pub async fn connect(config: &Config) -> Result<Client, tokio_postgres::Error> {
     Ok(client)
 }
 
-/// Waits for the database to accept connections, which matters on Cloud Run
-/// where the Cloud SQL socket may appear shortly after the container starts.
-pub async fn wait_until_ready(pool: &Pool) -> Result<deadpool_postgres::Client, PoolError> {
-    let mut attempt = 1;
+/// Retries `attempt` while the database starts up, which matters on Cloud
+/// Run (the Cloud SQL socket may appear shortly after the container starts)
+/// and under docker compose (the first start of a volume runs an init phase).
+async fn retry_startup<T, E: std::fmt::Display, F: Future<Output = Result<T, E>>>(
+    mut attempt: impl FnMut() -> F,
+) -> Result<T, E> {
+    let mut tries = 1;
     loop {
-        match pool.get().await {
-            Ok(client) => return Ok(client),
-            Err(err) if attempt < STARTUP_ATTEMPTS => {
-                warn!(attempt, error = %err, "database not ready, retrying");
+        match attempt().await {
+            Ok(value) => return Ok(value),
+            Err(err) if tries < STARTUP_ATTEMPTS => {
+                warn!(attempt = tries, error = %err, "database not ready, retrying");
                 tokio::time::sleep(STARTUP_RETRY_DELAY).await;
-                attempt += 1;
+                tries += 1;
             }
             Err(err) => return Err(err),
         }
     }
 }
 
-/// `CREATE TABLE IF NOT EXISTS orders (...)` from the catalog, optionally
-/// with the primary key (the seeder adds it after loading).
-pub fn create_table_sql(primary_key: bool) -> String {
-    let mut definitions: Vec<String> = COLUMNS
-        .iter()
-        .map(|column| {
-            let not_null = if column.nullable { "" } else { " NOT NULL" };
-            format!("{} {}{not_null}", column.quoted(), column.ty.sql())
-        })
-        .collect();
-    if primary_key {
-        definitions.push("PRIMARY KEY (\"id\")".to_owned());
-    }
-    format!(
-        "CREATE TABLE IF NOT EXISTS {TABLE} (\n  {}\n)",
-        definitions.join(",\n  ")
-    )
+/// Waits for the database to accept connections from the pool.
+pub async fn wait_until_ready(pool: &Pool) -> Result<deadpool_postgres::Client, PoolError> {
+    retry_startup(|| pool.get()).await
 }
 
-pub const CREATE_INDEXES_SQL: &str =
-    "CREATE INDEX IF NOT EXISTS orders_created_at_idx ON orders (\"created_at\")";
+/// [`connect`] with the same startup retry as [`wait_until_ready`].
+pub async fn connect_with_retry(config: &Config) -> Result<Client, tokio_postgres::Error> {
+    retry_startup(|| connect(config)).await
+}
 
-/// Creates `orders` with its indexes unless it already exists. An existing
-/// table is left alone: even `CREATE INDEX IF NOT EXISTS` would queue behind
-/// a running autovacuum.
-pub async fn ensure_table(client: &Client) -> Result<(), tokio_postgres::Error> {
-    if table_exists(client).await? {
-        return Ok(());
+/// A pooled connection used by one request. Dropped before
+/// [`Self::release`] (the client went away while a query ran), it cancels
+/// the running query and closes the connection instead of returning it to
+/// the pool with an abandoned result still streaming in, which the next
+/// request would otherwise wait for and report as its own DB time.
+pub struct GuardedClient(Option<deadpool_postgres::Client>);
+
+impl GuardedClient {
+    pub fn new(client: deadpool_postgres::Client) -> Self {
+        Self(Some(client))
     }
+
+    /// Returns the connection to the pool: its queries have completed.
+    pub fn release(mut self) {
+        self.0.take();
+    }
+}
+
+impl std::ops::Deref for GuardedClient {
+    type Target = deadpool_postgres::Client;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.as_ref().expect("present until released or dropped")
+    }
+}
+
+impl Drop for GuardedClient {
+    fn drop(&mut self) {
+        let Some(client) = self.0.take() else { return };
+        let client = deadpool_postgres::Object::take(client);
+        let token = client.cancel_token();
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        runtime.spawn(async move {
+            if let Err(err) = token.cancel_query(NoTls).await {
+                warn!(error = %err, "could not cancel an abandoned query");
+            }
+            // Closes the connection once the cancellation has been sent.
+            drop(client);
+        });
+    }
+}
+
+/// Key of the session-level advisory lock a seeder holds for its whole run.
+/// `serve` takes it briefly while it creates missing relations.
+const SEED_LOCK_KEY: i64 = 0x7365_6564_706c_6179;
+
+/// Takes the seed lock if nobody holds it.
+pub async fn try_lock_seeding(client: &Client) -> Result<bool, tokio_postgres::Error> {
     client
-        .batch_execute(&format!(
-            "{};\n{CREATE_INDEXES_SQL}",
-            create_table_sql(true)
-        ))
+        .query_one("SELECT pg_try_advisory_lock($1)", &[&SEED_LOCK_KEY])
+        .await?
+        .try_get(0)
+}
+
+/// Waits for the seed lock.
+pub async fn lock_seeding(client: &Client) -> Result<(), tokio_postgres::Error> {
+    client
+        .execute("SELECT pg_advisory_lock($1)", &[&SEED_LOCK_KEY])
         .await
+        .map(drop)
 }
 
-pub async fn table_exists(client: &Client) -> Result<bool, tokio_postgres::Error> {
-    let row = client
-        .query_one(&format!("SELECT to_regclass('{TABLE}') IS NOT NULL"), &[])
-        .await?;
-    row.try_get(0)
+pub async fn unlock_seeding(client: &Client) -> Result<(), tokio_postgres::Error> {
+    client
+        .execute("SELECT pg_advisory_unlock($1)", &[&SEED_LOCK_KEY])
+        .await
+        .map(drop)
 }
 
-pub async fn table_has_rows(client: &Client) -> Result<bool, tokio_postgres::Error> {
-    if !table_exists(client).await? {
-        return Ok(false);
+pub async fn relation_exists(client: &Client, name: &str) -> Result<bool, tokio_postgres::Error> {
+    client
+        .query_one("SELECT to_regclass($1) IS NOT NULL", &[&name])
+        .await?
+        .try_get(0)
+}
+
+/// Creates every missing relation of every dataset: empty tables with their
+/// keys, the views, and the materialized view (cheap on empty tables). An
+/// existing relation is left alone, even a table from an older schema, and
+/// one that cannot be made (say, the tables of an interrupted seed still
+/// lack their keys) is skipped with a warning: the server then serves what
+/// exists until the next seed replaces everything. Skipped while a seeder
+/// holds the seed lock, since it creates everything itself. Returns the
+/// names of the relations it created.
+pub async fn create_missing_relations(
+    client: &Client,
+) -> Result<Vec<&'static str>, tokio_postgres::Error> {
+    if !try_lock_seeding(client).await? {
+        info!("a seeder is running; leaving the relations to it");
+        return Ok(Vec::new());
     }
-    let row = client
-        .query_one(&format!("SELECT EXISTS (SELECT 1 FROM {TABLE})"), &[])
-        .await?;
-    row.try_get(0)
+    let created = create_missing_relations_locked(client).await;
+    unlock_seeding(client).await?;
+    created
 }
 
-/// Largest id in the table, 0 when empty.
-pub async fn max_id(client: &Client) -> Result<i64, tokio_postgres::Error> {
-    let row = client
-        .query_one(
-            &format!("SELECT coalesce(max(\"id\"), 0) FROM {TABLE}"),
-            &[],
-        )
-        .await?;
-    row.try_get(0)
+async fn create_missing_relations_locked(
+    client: &Client,
+) -> Result<Vec<&'static str>, tokio_postgres::Error> {
+    let tables = ddl::TABLES.iter().map(|table| {
+        let mut statements = vec![table.create_sql()];
+        statements.extend(table.constraints_sql());
+        (table.name, statements)
+    });
+    // Plain views have no IF NOT EXISTS.
+    let views = ddl::VIEWS.iter().map(|view| (view.name, view.create_sql()));
+    let relations: Vec<(&'static str, Vec<String>)> = tables.chain(views).collect();
+    let mut created = Vec::new();
+    for (name, statements) in relations {
+        if relation_exists(client, name).await? {
+            continue;
+        }
+        // Several statements in one simple query run as one transaction, so
+        // a failure leaves nothing half-made.
+        match client.batch_execute(&statements.join(";\n")).await {
+            Ok(()) => created.push(name),
+            Err(err) => warn!(relation = name, error = %err, "could not create a missing relation"),
+        }
+    }
+    Ok(created)
+}
+
+/// `state` of a seed that finished.
+pub const SEED_COMPLETE: &str = "complete";
+/// `state` while a seed runs, and after one that was interrupted.
+pub const SEED_LOADING: &str = "loading";
+
+/// The `seed_status` row: what the last seed did and whether it finished.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SeedStatus {
+    pub schema_version: i32,
+    pub state: String,
+    pub orders: i64,
+    pub order_items: i64,
+    pub seed: i64,
+    pub started_at: Timestamp,
+    pub finished_at: Option<Timestamp>,
+}
+
+impl SeedStatus {
+    /// A finished seed of the current schema, which `--if-empty` keeps.
+    pub fn is_complete(&self) -> bool {
+        self.state == SEED_COMPLETE && self.schema_version == ddl::SCHEMA_VERSION
+    }
+
+    /// Changes whenever a seed starts or finishes; the row cache drops its
+    /// entries when it does.
+    pub fn generation(&self) -> SeedGeneration {
+        SeedGeneration {
+            started_at: self.started_at,
+            finished_at: self.finished_at,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TableStats {
-    pub row_estimate: i64,
-    pub max_id: i64,
-    pub table_bytes: i64,
+pub struct SeedGeneration {
+    started_at: Timestamp,
+    finished_at: Option<Timestamp>,
 }
 
-/// Planner row estimate (exact count if the table was never analyzed),
-/// `max(id)` and total size including indexes.
-pub async fn table_stats(client: &Client) -> Result<TableStats, tokio_postgres::Error> {
-    let row = client
-        .query_one(
-            &format!(
-                "SELECT c.reltuples::float8, pg_total_relation_size(c.oid), \
-                        (SELECT coalesce(max(\"id\"), 0) FROM {TABLE}) \
-                 FROM pg_class c WHERE c.oid = '{TABLE}'::regclass"
-            ),
+/// The `seed_status` row, `None` before the first seed (no table or no row).
+pub async fn seed_status(client: &Client) -> Result<Option<SeedStatus>, tokio_postgres::Error> {
+    let row = match client
+        .query_opt(
+            "SELECT schema_version, state, orders, order_items, seed, started_at, finished_at \
+             FROM seed_status",
             &[],
         )
-        .await?;
+        .await
+    {
+        Ok(row) => row,
+        Err(err) if err.code() == Some(&SqlState::UNDEFINED_TABLE) => return Ok(None),
+        Err(err) => return Err(err),
+    };
+    row.map(|row| {
+        Ok(SeedStatus {
+            schema_version: row.try_get(0)?,
+            state: row.try_get(1)?,
+            orders: row.try_get(2)?,
+            order_items: row.try_get(3)?,
+            seed: row.try_get(4)?,
+            started_at: row.try_get(5)?,
+            finished_at: row.try_get(6)?,
+        })
+    })
+    .transpose()
+}
+
+/// What `/api/info` reports about a dataset; `None` where it has no cheap
+/// answer, or the relation does not exist.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DatasetStats {
+    pub row_estimate: Option<i64>,
+    pub max_key: Option<i64>,
+    pub bytes: Option<i64>,
+}
+
+/// Row estimate, largest key and size of `dataset`, from catalog statistics
+/// and index lookups only: never the dataset's own query.
+pub async fn dataset_stats(
+    client: &Client,
+    dataset: &Dataset,
+) -> Result<DatasetStats, tokio_postgres::Error> {
+    match dataset.stats {
+        Stats::Relation => relation_stats(client, dataset.relation, dataset.key).await,
+        Stats::Join { rows, key, tables } => {
+            let stats = relation_stats(client, rows, key).await?;
+            if stats.row_estimate.is_none() {
+                return Ok(stats);
+            }
+            let bytes = client
+                .query_one(
+                    "SELECT sum(pg_total_relation_size(to_regclass(t)))::bigint \
+                     FROM unnest($1::text[]) AS t",
+                    &[&tables],
+                )
+                .await?
+                .try_get(0)?;
+            Ok(DatasetStats { bytes, ..stats })
+        }
+        Stats::Mirror(twin) => {
+            let stats = relation_stats(client, twin.relation, twin.key).await?;
+            Ok(DatasetStats {
+                bytes: None,
+                ..stats
+            })
+        }
+    }
+}
+
+/// Planner row estimate (an exact count if never analyzed), `max(key)` and
+/// total size including indexes of one table or materialized view; nothing
+/// if it does not exist.
+async fn relation_stats(
+    client: &Client,
+    relation: &str,
+    key: &str,
+) -> Result<DatasetStats, tokio_postgres::Error> {
+    let Some(row) = client
+        .query_opt(
+            "SELECT reltuples::float8, pg_total_relation_size(oid) \
+             FROM pg_class WHERE oid = to_regclass($1)",
+            &[&format!("\"{relation}\"")],
+        )
+        .await?
+    else {
+        return Ok(DatasetStats::default());
+    };
+    // An index lookup: the key is the first column of a unique index.
+    let max_key = client
+        .query_one(
+            &format!("SELECT coalesce(max(\"{key}\"), 0) FROM \"{relation}\""),
+            &[],
+        )
+        .await?
+        .try_get(0)?;
     let reltuples: f64 = row.try_get(0)?;
     // Postgres 14+ reports -1 until the first VACUUM or ANALYZE.
     let row_estimate = if reltuples < 0.0 {
         let count = client
-            .query_one(&format!("SELECT count(*) FROM {TABLE}"), &[])
+            .query_one(&format!("SELECT count(*) FROM \"{relation}\""), &[])
             .await?;
         count.try_get(0)?
     } else {
         reltuples.round() as i64
     };
-    Ok(TableStats {
-        row_estimate,
-        table_bytes: row.try_get(1)?,
-        max_id: row.try_get(2)?,
+    Ok(DatasetStats {
+        row_estimate: Some(row_estimate),
+        max_key: Some(max_key),
+        bytes: Some(row.try_get(1)?),
     })
 }
 
@@ -180,8 +371,8 @@ pub async fn table_stats(client: &Client) -> Result<TableStats, tokio_postgres::
 pub struct FetchedRows {
     pub rows: Vec<Row>,
     pub columns: ColumnSelection,
-    /// Id of the last row, `None` when no rows matched.
-    pub last_id: Option<i64>,
+    /// Key of the last row, `None` when no rows matched.
+    pub last_key: Option<i64>,
 }
 
 pub async fn fetch_rows(
@@ -193,16 +384,16 @@ pub async fn fetch_rows(
     }
     let statement = client.prepare_cached(&query.sql()).await?;
     let rows = client
-        .query(&statement, &[&query.after_id, &query.limit])
+        .query(&statement, &[&query.after_key, &query.limit])
         .await?;
-    let last_id = rows
+    let last_key = rows
         .last()
-        .map(|row| row.try_get::<_, i64>(query.id_index()))
+        .map(|row| row.try_get::<_, i64>(query.key_index()))
         .transpose()?;
     Ok(FetchedRows {
         rows,
         columns: query.columns.clone(),
-        last_id,
+        last_key,
     })
 }
 
@@ -238,16 +429,5 @@ mod tests {
     fn keeps_an_explicit_application_name() {
         let config = parse_config("postgres://localhost/db?application_name=probe").unwrap();
         assert_eq!(config.get_application_name(), Some("probe"));
-    }
-
-    #[test]
-    fn ddl_follows_the_catalog() {
-        let ddl = create_table_sql(true);
-        assert!(ddl.starts_with("CREATE TABLE IF NOT EXISTS orders ("));
-        assert!(ddl.contains("\"id\" BIGINT NOT NULL"));
-        assert!(ddl.contains("\"ship_date\" DATE,"));
-        assert!(ddl.contains("\"discount\" REAL NOT NULL"));
-        assert!(ddl.contains("PRIMARY KEY (\"id\")"));
-        assert!(!create_table_sql(false).contains("PRIMARY KEY"));
     }
 }

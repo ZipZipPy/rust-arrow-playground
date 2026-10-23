@@ -35,7 +35,7 @@ struct Cli {
 enum Command {
     /// Serve the HTTP API and the built frontend.
     Serve(ServeConfig),
-    /// Fill the orders table with deterministic mock data.
+    /// Fill every dataset with deterministic mock data.
     Seed(SeedConfig),
     /// Write rows to a JSON, Arrow IPC or Parquet file.
     Export(ExportConfig),
@@ -51,7 +51,14 @@ async fn main() -> anyhow::Result<()> {
 
     match Cli::parse().command {
         Command::Serve(config) => server::run(config).await,
-        Command::Seed(config) => seed::run(&config).await.map(drop),
+        // As PID 1 in a container the seeder gets no default signal handling,
+        // so stop on SIGTERM/SIGINT here; `seed_status` stays 'loading'.
+        Command::Seed(config) => tokio::select! {
+            outcome = seed::run(&config) => outcome.map(drop),
+            () = server::shutdown_signal() => {
+                anyhow::bail!("seed interrupted; the next run (even with --if-empty) seeds again")
+            }
+        },
         Command::Export(config) => export::run(&config).await,
     }
 }

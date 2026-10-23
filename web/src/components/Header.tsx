@@ -2,6 +2,7 @@ import { useState } from 'react';
 import type { ThemeChoice } from '../hooks/useTheme';
 import type { RttState } from '../hooks/useRtt';
 import type { ServerInfoState } from '../hooks/useServerInfo';
+import type { DatasetInfo } from '../lib/types';
 import { targetLabel } from '../lib/api';
 import { formatBytes, formatCompact, formatMs } from '../lib/format';
 import { ConnectionPanel } from './ConnectionPanel';
@@ -11,6 +12,8 @@ interface HeaderProps {
   apiBase: string;
   onApiBaseChange: (base: string) => void;
   server: ServerInfoState;
+  /** The selected dataset, for the size chip. */
+  dataset: DatasetInfo | null;
   rtt: RttState;
   busy: boolean;
   theme: ThemeChoice;
@@ -43,7 +46,13 @@ function ThemeIcon({ theme }: { theme: ThemeChoice }) {
   );
 }
 
-export function Header({ apiBase, onApiBaseChange, server, rtt, busy, theme, onCycleTheme }: HeaderProps) {
+function datasetTitle(d: DatasetInfo): string {
+  const rows = d.row_estimate === null ? 'unknown number of rows' : `${d.row_estimate.toLocaleString('en-US')} rows (estimate)`;
+  const key = d.max_key === null ? '' : `, max ${d.key_column} ${d.max_key.toLocaleString('en-US')}`;
+  return `${d.label}: ${rows}${key}`;
+}
+
+export function Header({ apiBase, onApiBaseChange, server, dataset, rtt, busy, theme, onCycleTheme }: HeaderProps) {
   const [editing, setEditing] = useState(false);
   const { info } = server;
   const status = server.loading ? 'loading' : info ? 'ok' : 'error';
@@ -76,11 +85,12 @@ export function Header({ apiBase, onApiBaseChange, server, rtt, busy, theme, onC
             <span className="chip-label">Server</span>
             <span className="chip-value">{targetLabel(apiBase)}</span>
           </button>
-          {info && (
-            <span className="chip" title={`${info.row_estimate.toLocaleString('en-US')} rows (estimate), max id ${info.max_id.toLocaleString('en-US')}`}>
-              <span className="chip-label">{info.table}</span>
+          {dataset && (
+            <span className="chip" title={datasetTitle(dataset)}>
+              <span className="chip-label">{dataset.name}</span>
               <span className="chip-value">
-                {formatCompact(info.row_estimate)} rows · {formatBytes(info.table_bytes)}
+                {dataset.row_estimate === null ? '? rows' : `${formatCompact(dataset.row_estimate)} rows`}
+                {dataset.bytes !== null && ` · ${formatBytes(dataset.bytes)}`}
               </span>
             </span>
           )}

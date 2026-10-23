@@ -10,7 +10,9 @@ use tracing::info;
 
 use crate::config::ExportConfig;
 use crate::db;
-use crate::encode::{self, ArrowContainer, Encoding, Format, IpcCompression, ParquetCompression};
+use crate::encode::{
+    self, ArrowContainer, CancelFlag, Encoding, Format, IpcCompression, ParquetCompression,
+};
 use crate::query::RowsQuery;
 use crate::schema::ColumnSelection;
 
@@ -40,9 +42,13 @@ pub fn encoding(config: &ExportConfig) -> anyhow::Result<Encoding> {
 pub async fn run(config: &ExportConfig) -> anyhow::Result<()> {
     let encoding = encoding(config)?;
     let query = RowsQuery {
-        after_id: i64::try_from(config.offset).context("--offset is too large")?,
+        dataset: config.dataset,
+        after_key: i64::try_from(config.offset).context("--offset is too large")?,
         limit: i64::try_from(config.rows).context("--rows is too large")?,
-        columns: ColumnSelection::parse(config.columns.as_deref().unwrap_or_default())?,
+        columns: ColumnSelection::parse(
+            config.dataset,
+            config.columns.as_deref().unwrap_or_default(),
+        )?,
     };
 
     let pool = db::create_pool(config.database.clone(), 1)?;
@@ -62,6 +68,7 @@ pub async fn run(config: &ExportConfig) -> anyhow::Result<()> {
             fetched.columns.columns(),
             &encoding,
             ArrowContainer::File,
+            &CancelFlag::default(),
         )?;
         let mut file = writer.into_inner().map_err(|err| err.into_error())?;
         file.flush()?;
@@ -70,6 +77,7 @@ pub async fn run(config: &ExportConfig) -> anyhow::Result<()> {
     .await??;
 
     info!(
+        dataset = config.dataset.name,
         rows = row_count,
         format = %encoding.format(),
         variant = %encoding.label(),
@@ -142,6 +150,26 @@ mod tests {
         assert!(encoding(&config(&["--format", "arrow", "--compression", "snappy"])).is_err());
         assert!(encoding(&config(&["--format", "json", "--compression", "gzip"])).is_err());
         assert!(encoding(&config(&["--format", "json", "--compression", "none"])).is_ok());
+    }
+
+    #[test]
+    fn dataset_defaults_to_orders_and_is_validated() {
+        assert_eq!(config(&["--format", "json"]).dataset.name, "orders");
+        let lines = config(&["--format", "json", "--dataset", "order_lines"]);
+        assert_eq!(lines.dataset.name, "order_lines");
+        let argv = [
+            "export",
+            "--database-url",
+            "postgres://localhost/db",
+            "--out",
+            "x",
+            "--format",
+            "json",
+            "--dataset",
+            "users",
+        ];
+        let err = Cli::try_parse_from(argv).err().unwrap().to_string();
+        assert!(err.contains("unknown dataset \"users\""), "{err}");
     }
 
     #[test]

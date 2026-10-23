@@ -1,11 +1,12 @@
 import { columnsKey, variantLabel } from './settings';
-import { type MeasuredRequest, measureRequest, resetResourceTimings } from './measure';
-import { type ParquetReader, previewRows } from './decode';
+import { fetchUnmeasured, type MeasuredRequest, measureRequest, resetResourceTimings } from './measure';
+import { type ParquetReader, pickUseColumn, previewRows, useColumns } from './decode';
 import { loadParquet } from './parquet';
 import type { PlannedRequest } from './plan';
-import type { DataRequest, Measurement, PreviewTable } from './types';
+import type { ColumnInfo, DataRequest, Measurement, OffsetMode, PreviewTable, UseScope } from './types';
 
 export interface LatestPreview {
+  dataset: string;
   variant: string;
   rowCount: number;
   table: PreviewTable;
@@ -23,25 +24,27 @@ export interface ExecuteOptions {
   kind: Measurement['kind'];
   batchId: number;
   plan: PlannedRequest[];
-  useColumn: string | null;
+  /** The selected columns, in catalog order. */
+  columns: readonly ColumnInfo[];
+  useScope: UseScope;
+  offsetMode: OffsetMode;
   signal: AbortSignal;
   onProgress(progress: Progress): void;
   onMeasurement(measurement: Measurement): void;
   onPreview(preview: LatestPreview): void;
 }
 
+type MeasurementContext = Pick<Measurement, 'batchId' | 'kind' | 'target' | 'offsetMode' | 'useScope' | 'useColumn'>;
+
 let nextMeasurementId = Date.now();
 
-export function toMeasurement(
-  result: MeasuredRequest,
-  request: DataRequest,
-  context: Pick<Measurement, 'batchId' | 'kind' | 'target' | 'useColumn'>,
-): Measurement {
+export function toMeasurement(result: MeasuredRequest, request: DataRequest, context: MeasurementContext): Measurement {
   nextMeasurementId += 1;
   return {
     id: nextMeasurementId,
     ...context,
     at: new Date().toISOString(),
+    dataset: request.dataset,
     format: request.format,
     variant: variantLabel(request),
     rowsRequested: request.rows,
@@ -51,9 +54,11 @@ export function toMeasurement(
     columnCount: result.columnCount,
     httpCompression: request.httpCompression,
     contentEncoding: result.headers.contentEncoding,
+    rowCache: request.cache,
     cache: result.headers.cache,
     dbMs: result.dbMs,
     encodeMs: result.encodeMs,
+    compressMs: result.compressMs,
     serverTotalMs: result.serverTotalMs,
     ...result.timings,
     ...result.sizes,
@@ -84,13 +89,23 @@ function settle(): Promise<void> {
 }
 
 /**
- * Runs a plan sequentially. Warm-up requests are measured but not reported.
- * Stops at the first error (which is rethrown) or when `signal` aborts.
+ * Runs a plan sequentially. Warm-up requests are measured but not reported;
+ * cache-priming requests are only fetched. Stops at the first error (which
+ * is rethrown) or when `signal` aborts.
  */
 export async function executePlan(opts: ExecuteOptions): Promise<void> {
   const { plan, signal } = opts;
   // Load parquet-wasm up front so its download and compile never land in a timing.
   const parquet: ParquetReader | null = plan.some((p) => p.request.format === 'parquet') ? await loadParquet() : null;
+  const used = useColumns(opts.useScope, opts.columns);
+  const context: MeasurementContext = {
+    batchId: opts.batchId,
+    kind: opts.kind,
+    target: opts.target,
+    offsetMode: opts.offsetMode,
+    useScope: opts.useScope,
+    useColumn: opts.useScope === 'column' ? pickUseColumn(opts.columns) : null,
+  };
   resetResourceTimings();
 
   for (const [index, planned] of plan.entries()) {
@@ -99,23 +114,19 @@ export async function executePlan(opts: ExecuteOptions): Promise<void> {
     await settle();
     signal.throwIfAborted();
 
-    const result = await measureRequest({
-      base: opts.base,
-      request: planned.request,
-      useColumn: opts.useColumn,
-      parquet,
-      signal,
-    });
-    if (planned.warmup) continue;
+    if (planned.role === 'prime') {
+      await fetchUnmeasured(opts.base, planned.request, signal);
+      continue;
+    }
+    const result = await measureRequest({ base: opts.base, request: planned.request, useColumns: used, parquet, signal });
+    if (planned.role === 'warmup') continue;
 
-    opts.onMeasurement(
-      toMeasurement(result, planned.request, {
-        batchId: opts.batchId,
-        kind: opts.kind,
-        target: opts.target,
-        useColumn: opts.useColumn,
-      }),
-    );
-    opts.onPreview({ variant: variantLabel(planned.request), rowCount: result.rowCount, table: previewRows(result.decoded) });
+    opts.onMeasurement(toMeasurement(result, planned.request, context));
+    opts.onPreview({
+      dataset: planned.request.dataset,
+      variant: variantLabel(planned.request),
+      rowCount: result.rowCount,
+      table: previewRows(result.decoded),
+    });
   }
 }

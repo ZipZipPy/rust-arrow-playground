@@ -32,7 +32,7 @@ export interface Timings {
   downloadMs: number;
   decodeMs: number;
   useMs: number;
-  /** End to end minus every other phase: connection setup, queuing, server overhead outside db/encode, JS scheduling. */
+  /** End to end minus every other phase: connection setup, queuing, server overhead outside db/encode/compress, JS scheduling. */
   otherMs: number;
   endToEndMs: number;
   timingSource: TimingSource;
@@ -47,6 +47,7 @@ export interface Sizes {
 export interface ServerTimes {
   dbMs: number | null;
   encodeMs: number | null;
+  compressMs: number | null;
   totalMs: number | null;
 }
 
@@ -71,20 +72,27 @@ export function serverTimes(headers: ServerHeaders, entry: ResourceTimingLike | 
   return {
     dbMs: headers.dbMs ?? fromEntry('db'),
     encodeMs: headers.encodeMs ?? fromEntry('encode'),
+    compressMs: headers.compressMs ?? fromEntry('compress'),
     totalMs: headers.totalMs ?? fromEntry('total'),
   };
 }
 
+/**
+ * Splits one request into phases. The server compresses the whole body before
+ * it sends the first byte (and reports that time), so time to first byte
+ * covers db + encode + compress, and download is the transfer alone (plus the
+ * browser decompressing the body as it streams in).
+ */
 export function computeTimings(marks: ClientMarks, entry: ResourceTimingLike | null, server: ServerTimes): Timings {
   const precise = hasNetworkTimings(entry);
   const ttfbMs = precise ? entry.responseStart - entry.requestStart : marks.headers - marks.start;
   const downloadMs = precise ? entry.responseEnd - entry.responseStart : marks.body - marks.headers;
-  const serverTotal = server.totalMs ?? (server.dbMs ?? 0) + (server.encodeMs ?? 0);
-  const networkWaitMs = nonNegative(ttfbMs - serverTotal);
+  const serverWork = (server.dbMs ?? 0) + (server.encodeMs ?? 0) + (server.compressMs ?? 0);
+  const networkWaitMs = nonNegative(ttfbMs - (server.totalMs ?? serverWork));
   const decodeMs = marks.decoded - marks.body;
   const useMs = marks.used - marks.decoded;
   const endToEndMs = marks.used - marks.start;
-  const accounted = (server.dbMs ?? 0) + (server.encodeMs ?? 0) + networkWaitMs + downloadMs + decodeMs + useMs;
+  const accounted = serverWork + networkWaitMs + downloadMs + decodeMs + useMs;
   return {
     ttfbMs,
     networkWaitMs,
@@ -99,11 +107,12 @@ export function computeTimings(marks: ClientMarks, entry: ResourceTimingLike | n
 
 /**
  * Wire bytes are the body as it crossed the network (after HTTP compression);
- * payload bytes are the body as the server produced it.
+ * payload bytes are the body as the server produced it. Without Resource
+ * Timing the server's X-Encoded-Bytes says what it sent.
  */
 export function computeSizes(entry: ResourceTimingLike | null, headers: ServerHeaders, bodyLength: number): Sizes {
   const encoded = entry && entry.encodedBodySize > 0 ? entry.encodedBodySize : null;
-  const fallbackWire = headers.contentEncoding ? headers.contentLength : bodyLength;
+  const fallbackWire = headers.encodedBytes ?? (headers.contentEncoding ? headers.contentLength : bodyLength);
   return {
     wireBytes: encoded ?? fallbackWire,
     transferBytes: entry && entry.transferSize > 0 ? entry.transferSize : null,

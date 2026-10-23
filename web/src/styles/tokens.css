@@ -21,7 +21,7 @@
   --border-strong: rgba(11, 11, 11, 0.18);
   --text: #0b0b0b;
   --text-2: #52514e;
-  --muted: #74736d;
+  --muted: #65645e;
   --grid: #e1e0d9;
   --baseline: #c3c2b7;
   --shadow: 0 1px 2px rgba(11, 11, 11, 0.06), 0 4px 16px rgba(11, 11, 11, 0.04);
@@ -30,9 +30,14 @@
   --accent-strong: #1c5cab;
   --accent-soft: #e3eefb;
   --accent-ink: #ffffff;
+  /* Filled buttons: white text needs 4.5:1, which --accent does not reach. */
+  --accent-solid: #256abf;
+  --accent-solid-hover: #1c5cab;
   --good: #006300;
   --bad: #b42b2b;
   --bad-soft: #fbe9e8;
+  --warning: #fab219;
+  --warning-soft: #fdf3dc;
   --focus: #2a78d6;
 
   /* Formats: JSON is the neutral baseline, the two Arrow transports carry hue. */
@@ -40,9 +45,11 @@
   --format-arrow: #2a78d6;
   --format-parquet: #1baf7a;
 
-  /* Request phases, in stacking order (validated adjacent-pair order). */
+  /* Request phases, in stacking order (validated adjacent-pair order; compress
+     next to network sits in the CVD 6-8 band, covered by gaps, legend and table). */
   --phase-db: #eb6834;
   --phase-encode: #6250d6;
+  --phase-compress: #1baf7a;
   --phase-network: #e34948;
   --phase-download: #008300;
   --phase-decode: #e87ba4;
@@ -69,15 +76,20 @@
     --accent-strong: #6da7ec;
     --accent-soft: #17283d;
     --accent-ink: #ffffff;
+    --accent-solid: #256abf;
+    --accent-solid-hover: #1c5cab;
     --good: #0ca30c;
     --bad: #e66767;
     --bad-soft: #3a1b1b;
+    --warning: #fab219;
+    --warning-soft: #33280f;
     --focus: #6da7ec;
     --format-json: #8a8881;
     --format-arrow: #3987e5;
     --format-parquet: #199e70;
     --phase-db: #d95926;
     --phase-encode: #9085e9;
+    --phase-compress: #199e70;
     --phase-network: #e66767;
     --phase-download: #008300;
     --phase-decode: #d55181;
@@ -104,15 +116,20 @@
   --accent-strong: #6da7ec;
   --accent-soft: #17283d;
   --accent-ink: #ffffff;
+  --accent-solid: #256abf;
+  --accent-solid-hover: #1c5cab;
   --good: #0ca30c;
   --bad: #e66767;
   --bad-soft: #3a1b1b;
+  --warning: #fab219;
+  --warning-soft: #33280f;
   --focus: #6da7ec;
   --format-json: #8a8881;
   --format-arrow: #3987e5;
   --format-parquet: #199e70;
   --phase-db: #d95926;
   --phase-encode: #9085e9;
+  --phase-compress: #199e70;
   --phase-network: #e66767;
   --phase-download: #008300;
   --phase-decode: #d55181;

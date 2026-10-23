@@ -10,6 +10,10 @@ export type IpcCompression = (typeof IPC_COMPRESSIONS)[number];
 export const PARQUET_COMPRESSIONS = ['none', 'snappy', 'gzip', 'zstd', 'lz4', 'brotli'] as const;
 export type ParquetCompression = (typeof PARQUET_COMPRESSIONS)[number];
 
+/** What the "use" step reads after decoding: every selected value, or one column. */
+export const USE_SCOPES = ['all', 'column'] as const;
+export type UseScope = (typeof USE_SCOPES)[number];
+
 export interface ColumnInfo {
   name: string;
   pg_type: string;
@@ -17,6 +21,34 @@ export interface ColumnInfo {
   nullable: boolean;
   dictionary: boolean;
   group: string;
+}
+
+export type DatasetKind = 'table' | 'view' | 'materialized_view';
+
+/** One relation the server can serve (see "Datasets" in docs/DESIGN.md). */
+export interface DatasetInfo {
+  name: string;
+  label: string;
+  kind: DatasetKind;
+  relation: string;
+  key_column: string;
+  description: string;
+  /** The defining SELECT, pretty-printed, for "Show SQL". */
+  sql: string;
+  /** null when unknown (the live view before the first seed). */
+  row_estimate: number | null;
+  max_key: number | null;
+  bytes: number | null;
+  columns: ColumnInfo[];
+}
+
+/** The `seed_status` row: null before the first seed. */
+export interface SeedStatus {
+  state: 'loading' | 'complete';
+  schema_version: number;
+  orders: number;
+  order_items: number;
+  finished_at: string | null;
 }
 
 export interface ServerMeta {
@@ -27,15 +59,14 @@ export interface ServerMeta {
 }
 
 export interface ApiInfo {
-  table: string;
-  row_estimate: number;
-  max_id: number;
-  table_bytes: number;
+  default_dataset: string;
+  datasets: DatasetInfo[];
+  seed: SeedStatus | null;
   max_rows: number;
-  columns: ColumnInfo[];
   formats: string[];
   ipc_compression: string[];
   parquet_compression: string[];
+  http_compression: string[];
   server: ServerMeta;
 }
 
@@ -56,6 +87,7 @@ export interface BenchReport {
 
 /** Everything that goes into one `/api/data` request. */
 export interface DataRequest {
+  dataset: string;
   format: DataFormat;
   rows: number;
   offset: number;
@@ -74,18 +106,26 @@ export interface DataRequest {
 export interface ServerHeaders {
   dbMs: number | null;
   encodeMs: number | null;
+  /** Server-side HTTP compression; 0 when none was applied. */
+  compressMs: number | null;
   totalMs: number | null;
   rowCount: number | null;
   columnCount: number | null;
   lastId: number | null;
   bodyBytes: number | null;
+  /** Bytes actually sent, after HTTP compression. */
+  encodedBytes: number | null;
   format: string | null;
+  dataset: string | null;
   cache: string | null;
   contentEncoding: string | null;
   contentLength: number | null;
 }
 
 export type TimingSource = 'resource-timing' | 'fetch';
+
+/** Whether the start id was fixed or drawn at random for every round. */
+export type OffsetMode = 'fixed' | 'random';
 
 /** One measured request, as stored in the history. */
 export interface Measurement {
@@ -95,18 +135,23 @@ export interface Measurement {
   kind: 'run' | 'compare';
   at: string;
   target: string;
+  dataset: string;
   format: DataFormat;
   variant: string;
   rowsRequested: number;
   offset: number;
+  offsetMode: OffsetMode;
   columnsKey: string;
   rowCount: number;
   columnCount: number;
   httpCompression: boolean;
   contentEncoding: string | null;
+  /** The request's `cache` flag; `cache` below is the server's X-Cache answer. */
+  rowCache: boolean;
   cache: string | null;
   dbMs: number | null;
   encodeMs: number | null;
+  compressMs: number | null;
   serverTotalMs: number | null;
   ttfbMs: number;
   networkWaitMs: number;
@@ -119,6 +164,8 @@ export interface Measurement {
   transferBytes: number | null;
   payloadBytes: number;
   timingSource: TimingSource;
+  useScope: UseScope;
+  /** The column the "use" step read when `useScope` is 'column'; null otherwise. */
   useColumn: string | null;
   useValue: number;
 }

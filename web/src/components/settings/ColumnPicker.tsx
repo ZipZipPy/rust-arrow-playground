@@ -1,4 +1,4 @@
-import { COLUMN_GROUPS, columnsForGroup } from '../../lib/settings';
+import { columnGroups, columnsForGroup } from '../../lib/settings';
 import type { ColumnInfo } from '../../lib/types';
 
 interface ColumnPickerProps {
@@ -9,10 +9,13 @@ interface ColumnPickerProps {
   disabled?: boolean;
 }
 
-const PRESETS: { key: string; label: string; group: string | null }[] = [
-  { key: 'all', label: 'All', group: null },
-  ...COLUMN_GROUPS.map((group) => ({ key: group, label: group[0]!.toUpperCase() + group.slice(1), group })),
-];
+/** "All", then one preset per column group the dataset has. */
+function presets(catalog: readonly ColumnInfo[]): { key: string; label: string; group: string | null }[] {
+  return [
+    { key: 'all', label: 'All', group: null },
+    ...columnGroups(catalog).map((group) => ({ key: group, label: group[0]!.toUpperCase() + group.slice(1), group })),
+  ];
+}
 
 function sameSelection(a: readonly string[], b: readonly string[]): boolean {
   return a.length === b.length && a.every((name) => b.includes(name));
@@ -34,7 +37,7 @@ export function ColumnPicker({ catalog, value, onChange, disabled }: ColumnPicke
   return (
     <div className="columns">
       <div className="segmented segmented-wrap" role="group" aria-label="Column presets">
-        {PRESETS.map((preset) => {
+        {presets(catalog).map((preset) => {
           const names = columnsForGroup(catalog, preset.group) ?? catalog.map((c) => c.name);
           return (
             <button

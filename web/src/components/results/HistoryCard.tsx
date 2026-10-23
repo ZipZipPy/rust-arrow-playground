@@ -4,7 +4,7 @@ import { toCsv, toMarkdown } from '../../lib/export';
 import { formatBytes, formatInt, formatMs } from '../../lib/format';
 import type { Measurement } from '../../lib/types';
 import { Term } from '../InfoTip';
-import { Card, FormatTag } from './common';
+import { Card, FormatTag, TableScroll } from './common';
 
 const VISIBLE_ROWS = 100;
 
@@ -58,11 +58,12 @@ export function HistoryCard({ history, onClear }: HistoryCardProps) {
       }
     >
       {history.length > 0 && (
-        <div className="table-scroll history-scroll">
+        <TableScroll label="Measured requests" className="history-scroll">
           <table className="data-table history-table">
             <thead>
               <tr>
                 <th scope="col">Time</th>
+                <th scope="col">Dataset</th>
                 <th scope="col">Variant</th>
                 <th scope="col" className="num">Rows</th>
                 <th scope="col" className="num"><Term term="endToEnd">End to end</Term></th>
@@ -82,6 +83,7 @@ export function HistoryCard({ history, onClear }: HistoryCardProps) {
                     {timeOfDay(m.at)}
                     {m.kind === 'compare' && <span className="badge">cmp</span>}
                   </td>
+                  <td className="nowrap">{m.dataset}</td>
                   <td className="nowrap">
                     <FormatTag format={m.format}>{m.variant}</FormatTag>
                   </td>
@@ -98,7 +100,7 @@ export function HistoryCard({ history, onClear }: HistoryCardProps) {
               ))}
             </tbody>
           </table>
-        </div>
+        </TableScroll>
       )}
     </Card>
   );

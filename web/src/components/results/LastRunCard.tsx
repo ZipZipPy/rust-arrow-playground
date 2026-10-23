@@ -9,7 +9,16 @@ import {
   formatPercent,
   formatRowsPerSecond,
 } from '../../lib/format';
-import { counterpartSummary, type GroupSummary, PHASES, ratio, speedup, summarizeGroup } from '../../lib/stats';
+import { USE_SCOPE_LABELS } from '../../lib/settings';
+import {
+  type Counterpart as CounterpartRun,
+  counterpartSummary,
+  type GroupSummary,
+  PHASES,
+  ratio,
+  speedup,
+  summarizeGroup,
+} from '../../lib/stats';
 import type { Measurement } from '../../lib/types';
 import { BarRows } from '../charts/BarRows';
 import { FORMAT_COLOR, PHASE_META } from '../charts/meta';
@@ -24,31 +33,48 @@ interface LastRunCardProps {
   ref?: Ref<HTMLElement>;
 }
 
-function Counterpart({ current, other }: { current: GroupSummary; other: GroupSummary | null }) {
+function Counterpart({ current, other }: { current: GroupSummary; other: CounterpartRun | null }) {
   const isJson = current.format === 'json';
+  const toggle = isJson ? 'Turn “Use Arrow” on' : 'Turn “Use Arrow” off';
   if (!other) {
     return (
       <p className="callout">
         {isJson
-          ? 'Turn “Use Arrow” on and run again with the same rows and columns to see how much Arrow saves.'
-          : 'Turn “Use Arrow” off and run again with the same rows and columns to see what JSON costs.'}
+          ? `${toggle} and run again with the same settings to see how much Arrow saves.`
+          : `${toggle} and run again with the same settings to see what JSON costs.`}
       </p>
     );
   }
+  const otherName = isJson ? other.summary.variant : 'JSON';
+  if (other.differences.length > 0) {
+    return (
+      <div className="callout">
+        <p>Not compared with your latest {otherName} run, because these settings differ:</p>
+        <ul className="callout-differences">
+          {other.differences.map((d) => (
+            <li key={d.label}>
+              {d.label}: <strong>{d.current}</strong> here, <strong>{d.other}</strong> there
+            </li>
+          ))}
+        </ul>
+        <p>{toggle} and run again with these settings to compare like with like.</p>
+      </div>
+    );
+  }
   // Always phrase it as "Arrow-based vs JSON".
-  const [arrowSide, jsonSide] = isJson ? [other, current] : [current, other];
+  const [arrowSide, jsonSide] = isJson ? [other.summary, current] : [current, other.summary];
   const faster = speedup(jsonSide.endToEnd.median, arrowSide.endToEnd.median);
   const smaller = ratio(arrowSide.wireBytes, jsonSide.wireBytes);
-  const decode = speedup(jsonSide.decodeMs, arrowSide.decodeMs);
+  const browser = speedup(jsonSide.browserMs, arrowSide.browserMs);
   return (
     <div className="callout callout-compare">
       <span>
         <FormatTag format={arrowSide.format}>{arrowSide.variant}</FormatTag> vs <FormatTag format="json">JSON</FormatTag>
-        <span className="muted"> ({isJson ? 'your latest Arrow run' : 'your latest JSON run'}, same rows and columns)</span>
+        <span className="muted"> (your latest {otherName} run, same settings)</span>
       </span>
       <span className="callout-figures">
         <strong>{describeSpeedup(faster)}</strong> end to end · <strong>{describeSizeRatio(smaller)}</strong> on the wire ·
-        decode <strong>{describeSpeedup(decode)}</strong>
+        browser work <strong>{describeSpeedup(browser)}</strong>
       </span>
     </div>
   );
@@ -69,10 +95,11 @@ export function LastRunCard({ batch, history, running, ref }: LastRunCardProps) 
       busy={running}
       subtitle={
         <>
-          <FormatTag format={summary.format}>{summary.variant}</FormatTag> · {formatInt(summary.rowCount)} rows ×{' '}
-          {first.columnCount} columns · {summary.count === 1 ? '1 request' : `median of ${summary.count} requests`} · HTTP{' '}
-          {encoding}
-          {first.cache && first.cache !== 'off' ? ` · cache ${first.cache}` : ''}
+          <FormatTag format={summary.format}>{summary.variant}</FormatTag> · <strong>{first.dataset}</strong> ·{' '}
+          {formatInt(summary.rowCount)} rows × {first.columnCount} columns ·{' '}
+          {summary.count === 1 ? '1 request' : `median of ${summary.count} requests`} · HTTP {encoding}
+          {first.cache && first.cache !== 'off' ? ` · cache ${first.cache}` : ''} · touch{' '}
+          {USE_SCOPE_LABELS[first.useScope].toLowerCase()}
         </>
       }
     >
@@ -143,7 +170,7 @@ export function LastRunCard({ batch, history, running, ref }: LastRunCardProps) 
               value: summary.wireBytes,
               display: formatBytes(summary.wireBytes),
               color: FORMAT_COLOR[summary.format],
-              note: encoding === 'none' ? 'no HTTP compression' : `HTTP ${encoding}`,
+              note: encoding !== 'none' ? `HTTP ${encoding}` : first.httpCompression ? 'HTTP compression skipped: already compressed or tiny' : 'no HTTP compression',
             },
             {
               key: 'payload',

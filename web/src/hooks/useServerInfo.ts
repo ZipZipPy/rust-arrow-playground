@@ -10,31 +10,48 @@ export interface ServerInfoState {
   reload: () => void;
 }
 
-/** Loads `/api/info` for the current API base; reloads when the base changes. */
+/** The answer to one `/api/info` request, tagged with the request it answers. */
+export interface InfoAnswer {
+  base: string;
+  generation: number;
+  info: ApiInfo | null;
+  error: string | null;
+}
+
+/**
+ * Loads `/api/info` for the current API base; reloads when the base changes.
+ * Info belongs to the base it came from: right after a switch, `info` is null
+ * (so nothing runs against the new server with the old one's limits, columns
+ * or key range) until the new server answers.
+ */
 export function useServerInfo(base: string): ServerInfoState {
-  const [info, setInfo] = useState<ApiInfo | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [answer, setAnswer] = useState<InfoAnswer | null>(null);
   const [generation, setGeneration] = useState(0);
 
   useEffect(() => {
     const controller = new AbortController();
-    setLoading(true);
-    setError(null);
     fetchInfo(base, controller.signal)
-      .then((next) => {
-        setInfo(next);
-        setLoading(false);
+      .then((info) => {
+        if (!controller.signal.aborted) setAnswer({ base, generation, info, error: null });
       })
       .catch((e: unknown) => {
-        if (controller.signal.aborted) return;
-        setInfo(null);
-        setError(errorMessage(e));
-        setLoading(false);
+        if (!controller.signal.aborted) setAnswer({ base, generation, info: null, error: errorMessage(e) });
       });
     return () => controller.abort();
   }, [base, generation]);
 
   const reload = useCallback(() => setGeneration((g) => g + 1), []);
-  return { info, error, loading, reload };
+  return { ...infoFor(answer, base, generation), reload };
+}
+
+/** What the latest answer means for the current request (`base`, `generation`). */
+export function infoFor(answer: InfoAnswer | null, base: string, generation: number): Omit<ServerInfoState, 'reload'> {
+  const sameBase = answer?.base === base;
+  const current = sameBase && answer.generation === generation;
+  return {
+    // A reload of the same base keeps showing what it had until the answer arrives.
+    info: sameBase ? answer.info : null,
+    error: current ? answer.error : null,
+    loading: !current,
+  };
 }

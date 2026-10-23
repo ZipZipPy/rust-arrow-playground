@@ -111,14 +111,19 @@ jobs:
         run: |
           set -euo pipefail
           info=$(curl --fail --silent --show-error http://localhost:8080/api/info)
-          jq '{row_estimate, max_id, table_bytes}' <<<"$info"
-          jq --exit-status --argjson rows "$SEED_ROWS" '.max_id == $rows' <<<"$info" >/dev/null
-          for format in json arrow parquet; do
-            rows=$(curl --fail --silent --show-error --output "$RUNNER_TEMP/body.$format" \
-              --write-out '%header{x-row-count}' \
-              "http://localhost:8080/api/data?format=$format&rows=10000")
-            echo "$format: $rows rows, $(stat --format=%s "$RUNNER_TEMP/body.$format") bytes"
-            test "$rows" = 10000
+          jq '{seed, datasets: [.datasets[] | {name, row_estimate, max_key}]}' <<<"$info"
+          jq --exit-status --argjson rows "$SEED_ROWS" \
+            '.seed.state == "complete" and (.datasets[] | select(.name == "orders") | .max_key) == $rows' \
+            <<<"$info" >/dev/null
+          for dataset in $(jq -r '.datasets[].name' <<<"$info"); do
+            for format in json arrow parquet; do
+              body="$RUNNER_TEMP/$dataset.$format"
+              rows=$(curl --fail --silent --show-error --output "$body" \
+                --write-out '%header{x-row-count}' \
+                "http://localhost:8080/api/data?dataset=$dataset&format=$format&rows=1000")
+              echo "$dataset $format: $rows rows, $(stat --format=%s "$body") bytes"
+              test "$rows" = 1000
+            done
           done
           curl --fail --silent --show-error --output /dev/null http://localhost:8080/
 

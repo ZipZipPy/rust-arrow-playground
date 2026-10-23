@@ -23,6 +23,14 @@ const UNIX_EPOCH_DAYS_FROM_CE: i32 = 719_163;
 
 pub const MICROS_PER_DAY: i64 = 86_400_000_000;
 
+/// Days from 1970-01-01 to 0000-01-01 and to 10000-01-01: the years JSON's
+/// RFC 3339 text can express. Values read from Postgres must fall in this
+/// range, so every format accepts and rejects the same data.
+const MIN_DAYS: i32 = -719_528;
+const END_DAYS: i32 = 2_932_897;
+const MIN_MICROS: i64 = MIN_DAYS as i64 * MICROS_PER_DAY;
+const END_MICROS: i64 = END_DAYS as i64 * MICROS_PER_DAY;
+
 /// Length of `YYYY-MM-DDTHH:MM:SS.ffffffZ`.
 pub const RFC3339_LEN: usize = 27;
 /// Length of `YYYY-MM-DD`.
@@ -118,13 +126,19 @@ fn fixed<const N: usize>(raw: &[u8]) -> Result<[u8; N], BoxError> {
 }
 
 impl<'a> FromSql<'a> for Timestamp {
+    /// Rejects Postgres' `infinity` / `-infinity` (`i64::MAX` / `i64::MIN`)
+    /// and timestamps outside the years 0000..=9999, which RFC 3339 cannot
+    /// express, instead of passing them to Arrow as bogus instants.
     fn from_sql(_: &Type, raw: &'a [u8]) -> Result<Self, BoxError> {
         let pg_micros = i64::from_be_bytes(fixed(raw)?);
-        // Postgres' +/-infinity are i64::MAX/MIN and do not survive the shift.
-        let micros = pg_micros
+        if pg_micros == i64::MAX || pg_micros == i64::MIN {
+            return Err("infinite timestamps are not supported".into());
+        }
+        pg_micros
             .checked_add(PG_EPOCH_MICROS)
-            .ok_or("timestamp out of range")?;
-        Ok(Self(micros))
+            .filter(|micros| (MIN_MICROS..END_MICROS).contains(micros))
+            .map(Self)
+            .ok_or_else(|| OutOfRange.into())
     }
 
     fn accepts(ty: &Type) -> bool {
@@ -133,12 +147,18 @@ impl<'a> FromSql<'a> for Timestamp {
 }
 
 impl<'a> FromSql<'a> for Date {
+    /// Rejects `infinity` / `-infinity` (`i32::MAX` / `i32::MIN`) and dates
+    /// outside the years 0000..=9999, like [`Timestamp`].
     fn from_sql(_: &Type, raw: &'a [u8]) -> Result<Self, BoxError> {
         let pg_days = i32::from_be_bytes(fixed(raw)?);
-        let days = pg_days
+        if pg_days == i32::MAX || pg_days == i32::MIN {
+            return Err("infinite dates are not supported".into());
+        }
+        pg_days
             .checked_add(PG_EPOCH_DAYS)
-            .ok_or("date out of range")?;
-        Ok(Self(days))
+            .filter(|days| (MIN_DAYS..END_DAYS).contains(days))
+            .map(Self)
+            .ok_or_else(|| OutOfRange.into())
     }
 
     fn accepts(ty: &Type) -> bool {
@@ -259,5 +279,55 @@ mod tests {
 
         let infinity = i64::MAX.to_be_bytes();
         assert!(Timestamp::from_sql(&Type::TIMESTAMPTZ, &infinity).is_err());
+    }
+
+    fn timestamp_from_pg(pg_micros: i64) -> Result<Timestamp, String> {
+        Timestamp::from_sql(&Type::TIMESTAMPTZ, &pg_micros.to_be_bytes()).map_err(|e| e.to_string())
+    }
+
+    fn date_from_pg(pg_days: i32) -> Result<Date, String> {
+        Date::from_sql(&Type::DATE, &pg_days.to_be_bytes()).map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn infinities_and_unprintable_years_are_rejected_for_every_format() {
+        assert!(
+            timestamp_from_pg(i64::MAX)
+                .unwrap_err()
+                .contains("infinite")
+        );
+        assert!(
+            timestamp_from_pg(i64::MIN)
+                .unwrap_err()
+                .contains("infinite")
+        );
+        assert!(date_from_pg(i32::MAX).unwrap_err().contains("infinite"));
+        assert!(date_from_pg(i32::MIN).unwrap_err().contains("infinite"));
+
+        // 0044-03-15 BC would be a valid Arrow value but has no RFC 3339 form.
+        let ides_of_march_bc = -63_517_824_000_000_000 - PG_EPOCH_MICROS;
+        assert!(
+            timestamp_from_pg(ides_of_march_bc)
+                .unwrap_err()
+                .contains("0000..=9999")
+        );
+        assert!(date_from_pg(MIN_DAYS - 1 - PG_EPOCH_DAYS).is_err());
+        assert!(date_from_pg(END_DAYS - PG_EPOCH_DAYS).is_err());
+
+        // The first and last representable values are accepted and print.
+        let first = timestamp_from_pg(MIN_MICROS - PG_EPOCH_MICROS).unwrap();
+        let mut buf = [0; RFC3339_LEN];
+        assert_eq!(
+            first.write_rfc3339(&mut buf).unwrap(),
+            "0000-01-01T00:00:00.000000Z"
+        );
+        let last = timestamp_from_pg(END_MICROS - 1 - PG_EPOCH_MICROS).unwrap();
+        assert_eq!(
+            last.write_rfc3339(&mut buf).unwrap(),
+            "9999-12-31T23:59:59.999999Z"
+        );
+        let mut buf = [0; DATE_LEN];
+        let last_day = date_from_pg(END_DAYS - 1 - PG_EPOCH_DAYS).unwrap();
+        assert_eq!(last_day.write_iso(&mut buf).unwrap(), "9999-12-31");
     }
 }

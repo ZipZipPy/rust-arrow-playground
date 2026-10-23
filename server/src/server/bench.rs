@@ -6,7 +6,9 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 
 use crate::db::FetchedRows;
-use crate::encode::{self, EncodeError, Encoding, Format, IpcCompression, ParquetCompression};
+use crate::encode::{
+    self, CancelFlag, EncodeError, Encoding, Format, IpcCompression, ParquetCompression,
+};
 use crate::query::DEFAULT_BATCH_SIZE;
 
 #[derive(Debug, Serialize)]
@@ -59,14 +61,16 @@ impl From<Encoding> for VariantOptions {
 }
 
 /// Encodes `fetched` once per variant, one after another, so each
-/// measurement has the machine to itself. Blocking: call it off the runtime.
-pub fn run(fetched: &FetchedRows) -> Result<Vec<BenchResult>, EncodeError> {
+/// measurement has the machine to itself, and stops at the next variant once
+/// `cancel` is set. Blocking: call it off the runtime.
+pub fn run(fetched: &FetchedRows, cancel: &CancelFlag) -> Result<Vec<BenchResult>, EncodeError> {
     let columns = fetched.columns.columns();
     Encoding::bench_variants(DEFAULT_BATCH_SIZE)
         .into_iter()
         .map(|encoding| {
+            cancel.check()?;
             let started = Instant::now();
-            let bytes = encode::encode(&fetched.rows, columns, &encoding)?.len();
+            let bytes = encode::encode(&fetched.rows, columns, &encoding, cancel)?.len();
             Ok(BenchResult {
                 format: encoding.format(),
                 variant: encoding.label(),
@@ -110,6 +114,22 @@ mod tests {
             serde_json::to_string(&parquet).unwrap(),
             r#"{"parquet_compression":"snappy"}"#
         );
+    }
+
+    #[test]
+    fn a_cancelled_benchmark_stops_before_the_next_variant() {
+        let fetched = FetchedRows {
+            rows: Vec::new(),
+            columns: crate::schema::ColumnSelection::all(&crate::schema::ORDERS),
+            last_key: None,
+        };
+        let cancel = CancelFlag::default();
+        assert_eq!(run(&fetched, &cancel).unwrap().len(), 13);
+        cancel.cancel();
+        assert!(matches!(
+            run(&fetched, &cancel),
+            Err(EncodeError::Cancelled(_))
+        ));
     }
 
     #[test]
