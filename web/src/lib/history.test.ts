@@ -4,12 +4,20 @@ import { MAX_HISTORY, parseHistory, prependHistory } from './history';
 
 describe('parseHistory', () => {
   it('keeps current measurements as they are', () => {
-    const m = makeMeasurement({ dataset: 'order_lines', useScope: 'all', offsetMode: 'random', rowCache: true, compressMs: 2 });
+    const m = makeMeasurement({
+      dataset: 'order_lines',
+      useScope: 'all',
+      offsetMode: 'random',
+      rowCache: true,
+      compressMs: 2,
+      kind: 'servers',
+      region: 'us-central1',
+    });
     expect(parseHistory(JSON.parse(JSON.stringify([m])))).toEqual([m]);
   });
 
   it('fills in fields that measurements saved before datasets lack', () => {
-    const { dataset, offsetMode, rowCache, compressMs, useScope, ...old } = makeMeasurement({ cache: 'hit' });
+    const { dataset, offsetMode, rowCache, compressMs, useScope, region, ...old } = makeMeasurement({ cache: 'hit' });
     const [upgraded] = parseHistory([{ ...old, useColumn: 'total' }]);
     expect(upgraded).toMatchObject({
       dataset: 'orders',
@@ -18,6 +26,7 @@ describe('parseHistory', () => {
       compressMs: null,
       useScope: 'column',
       useColumn: 'total',
+      region: null,
     });
     expect(parseHistory([{ ...old, cache: 'off' }])[0]?.rowCache).toBe(false);
   });

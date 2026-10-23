@@ -47,8 +47,8 @@ export function HowToRead({ defaultOpen }: { defaultOpen: boolean }) {
         <p>
           <strong>Where it matters:</strong> on a fast local network, the browser’s work and the server’s encoding
           dominate. Over the internet, bytes dominate: HTTP compression shrinks JSON a lot (its cost shows as Compress on
-          the server), but Arrow and Parquet still send fewer bytes and the browser still avoids parsing text. Run Compare
-          locally and against a remote server to see both effects.
+          the server), but Arrow and Parquet still send fewer bytes and the browser still avoids parsing text. Compare
+          servers runs the same comparison against a nearby and a distant server side by side to see both effects.
         </p>
         <p>
           <strong>Datasets:</strong> a join view or a live aggregate moves time into PostgreSQL, which is the same for

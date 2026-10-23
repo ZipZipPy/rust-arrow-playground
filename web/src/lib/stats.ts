@@ -107,15 +107,59 @@ export function summarizeGroup(key: string, items: readonly Measurement[]): Grou
   };
 }
 
+function groupBy<K>(items: readonly Measurement[], key: (m: Measurement) => K): Map<K, Measurement[]> {
+  const groups = new Map<K, Measurement[]>();
+  for (const m of items) {
+    const list = groups.get(key(m));
+    if (list) list.push(m);
+    else groups.set(key(m), [m]);
+  }
+  return groups;
+}
+
 /** Groups by format, in the order formats first appear. */
 export function summarizeByFormat(items: readonly Measurement[]): GroupSummary[] {
-  const groups = new Map<DataFormat, Measurement[]>();
-  for (const m of items) {
-    const list = groups.get(m.format);
-    if (list) list.push(m);
-    else groups.set(m.format, [m]);
-  }
-  return [...groups].map(([format, list]) => summarizeGroup(format, list));
+  return [...groupBy(items, (m) => m.format)].map(([format, list]) => summarizeGroup(format, list));
+}
+
+const FORMAT_ORDER: Record<DataFormat, number> = { json: 0, arrow: 1, parquet: 2 };
+
+/** One server in Compare servers: its formats, the fastest one, and Arrow IPC against JSON. */
+export interface ServerSummary {
+  target: string;
+  region: string | null;
+  /** Median rows per response. */
+  rowCount: number;
+  /** JSON, Arrow IPC, Parquet, as far as measured. */
+  formats: GroupSummary[];
+  /** The format with the lowest median end-to-end time, once at least two were measured. */
+  fastest: DataFormat | null;
+  /** JSON's median end-to-end time divided by Arrow IPC's. */
+  arrowSpeedup: number | null;
+  /** Arrow IPC's median wire bytes as a fraction of JSON's. */
+  arrowSize: number | null;
+}
+
+/** Groups by server (target), in the order servers first appear, then by format. */
+export function summarizeByServer(items: readonly Measurement[]): ServerSummary[] {
+  return [...groupBy(items, (m) => m.target)].map(([target, list]) => {
+    const formats = summarizeByFormat(list).sort((a, b) => FORMAT_ORDER[a.format] - FORMAT_ORDER[b.format]);
+    const fastest = formats.reduce<GroupSummary | null>(
+      (best, g) => (best === null || g.endToEnd.median < best.endToEnd.median ? g : best),
+      null,
+    );
+    const json = formats.find((g) => g.format === 'json');
+    const arrow = formats.find((g) => g.format === 'arrow');
+    return {
+      target,
+      region: list[0]!.region,
+      rowCount: median(list.map((m) => m.rowCount)),
+      formats,
+      fastest: formats.length > 1 ? (fastest?.format ?? null) : null,
+      arrowSpeedup: json && arrow ? speedup(json.endToEnd.median, arrow.endToEnd.median) : null,
+      arrowSize: json && arrow ? ratio(arrow.wireBytes, json.wireBytes) : null,
+    };
+  });
 }
 
 interface PairedSetting {
@@ -179,6 +223,9 @@ export function counterpartSummary(history: readonly Measurement[], ref: Measure
   const candidates = history.filter((m) => (m.format === 'json') === wantJson && m.target === ref.target);
   const match = candidates.find((m) => settingDifferences(ref, m).length === 0) ?? candidates[0];
   if (!match) return null;
-  const batch = history.filter((m) => m.batchId === match.batchId && m.variant === match.variant);
+  // A Compare servers batch spans several targets.
+  const batch = history.filter(
+    (m) => m.batchId === match.batchId && m.variant === match.variant && m.target === match.target,
+  );
   return { summary: summarizeGroup(match.variant, batch), differences: settingDifferences(ref, match) };
 }

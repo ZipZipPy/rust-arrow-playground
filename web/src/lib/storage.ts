@@ -6,6 +6,7 @@ export const STORAGE_KEYS = {
   apiBase: 'rap.apiBase',
   settings: 'rap.settings.v1',
   history: 'rap.history.v1',
+  servers: 'rap.servers.v1',
   theme: 'rap.theme',
 } as const;
 

@@ -11,7 +11,8 @@ export default defineConfig({
   // parquet-wasm locates its .wasm relative to its own module; keep it out of
   // dependency pre-bundling so dev and build load it the same way.
   optimizeDeps: { exclude: ['parquet-wasm'] },
-  build: { outDir: 'dist', target: 'es2022' },
+  // One page that needs apache-arrow up front (most of the main chunk); parquet-wasm is already split off.
+  build: { outDir: 'dist', target: 'es2022', chunkSizeWarningLimit: 640 },
   test: {
     environment: 'node',
     include: ['src/**/*.test.ts'],

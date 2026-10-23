@@ -171,6 +171,18 @@ a {
   stroke-linejoin: round;
 }
 
+.link-button {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent-strong);
+  font: inherit;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
 /* Small labels */
 
 .badge {

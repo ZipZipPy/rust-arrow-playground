@@ -2,7 +2,7 @@ import { useCallback, useRef, useState } from 'react';
 import { errorMessage } from '../lib/errors';
 import type { Progress } from '../lib/runner';
 
-export type ActivityKind = 'run' | 'compare' | 'bench';
+export type ActivityKind = 'run' | 'compare' | 'servers' | 'bench';
 
 export interface Activity {
   kind: ActivityKind;

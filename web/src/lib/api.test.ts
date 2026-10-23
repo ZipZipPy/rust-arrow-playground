@@ -8,6 +8,7 @@ import {
   parseServerTiming,
   readServerHeaders,
   targetLabel,
+  withTimeout,
 } from './api';
 import type { DataRequest } from './types';
 
@@ -45,6 +46,31 @@ describe('normalizeBaseUrl', () => {
   it('labels targets', () => {
     expect(targetLabel('')).toBe('same origin');
     expect(targetLabel('https://svc.run.app')).toBe('svc.run.app');
+  });
+
+  it('keeps the path, so two servers behind one host get different labels', () => {
+    expect(targetLabel('https://lb.example.com/eu')).toBe('lb.example.com/eu');
+    expect(targetLabel('http://localhost:8080/prefix')).toBe('localhost:8080/prefix');
+  });
+});
+
+describe('withTimeout', () => {
+  const never = (signal: AbortSignal) =>
+    new Promise<never>((_, reject) => signal.addEventListener('abort', () => reject(signal.reason)));
+
+  it('passes the answer through', async () => {
+    await expect(withTimeout(1000, undefined, async () => 'ok')).resolves.toBe('ok');
+  });
+
+  it('reports a task that does not answer in time', async () => {
+    await expect(withTimeout(20, undefined, never)).rejects.toThrow('no answer within 0.02 s');
+  });
+
+  it('passes a cancellation through unchanged', async () => {
+    const controller = new AbortController();
+    const run = withTimeout(1000, controller.signal, never);
+    controller.abort();
+    await expect(run).rejects.toMatchObject({ name: 'AbortError' });
   });
 });
 

@@ -132,9 +132,11 @@ export interface Measurement {
   id: number;
   /** Requests started by the same click share a batch id. */
   batchId: number;
-  kind: 'run' | 'compare';
+  kind: 'run' | 'compare' | 'servers';
   at: string;
   target: string;
+  /** The server's region from `/api/info` (`$REGION`); null when it reports none. */
+  region: string | null;
   dataset: string;
   format: DataFormat;
   variant: string;
