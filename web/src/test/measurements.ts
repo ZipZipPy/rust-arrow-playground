@@ -10,6 +10,7 @@ export function makeMeasurement(overrides: Partial<Measurement> = {}): Measureme
     kind: 'run',
     at: '2026-01-02T03:04:05.000Z',
     target: 'same origin',
+    region: null,
     dataset: 'orders',
     format: 'json',
     variant: 'JSON',

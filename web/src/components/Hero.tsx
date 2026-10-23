@@ -10,8 +10,17 @@ interface HeroProps {
   ready: boolean;
   blockedReason: string | null;
   activity: Activity | null;
+  /**
+   * Compare servers: how many ticked servers answer, why it cannot start yet
+   * (null when it can), and a note on servers it leaves out. It does not
+   * depend on `ready`, which is about the API server.
+   */
+  servers: { count: number; blockedReason: string | null; note: string | null };
   onRun: () => void;
   onCompare: () => void;
+  onCompareServers: () => void;
+  /** Opens the server list. */
+  onChooseServers: () => void;
   onBench: () => void;
   onCancel: () => void;
 }
@@ -21,7 +30,12 @@ const FLAVORS = [
   { value: 'parquet', label: 'Parquet file', title: 'Compressed columnar file, decoded with parquet-wasm' },
 ] as const satisfies readonly { value: ArrowFlavor; label: string; title: string }[];
 
-const ACTIVITY_LABEL = { run: 'Running', compare: 'Comparing', bench: 'Server benchmark' } as const;
+const ACTIVITY_LABEL = {
+  run: 'Running',
+  compare: 'Comparing',
+  servers: 'Comparing servers',
+  bench: 'Server benchmark',
+} as const;
 const ROLE_LABEL = { warmup: 'warm-up', prime: 'loading the row cache' } as const;
 
 function describeFormat(s: Settings): string {
@@ -39,6 +53,12 @@ export function Hero(props: HeroProps) {
   const busy = activity !== null;
   const progress = activity?.progress;
   const percent = progress ? Math.round((progress.done / progress.total) * 100) : 0;
+  const serversHint = [
+    props.servers.blockedReason === blockedReason ? null : props.servers.blockedReason,
+    props.servers.note,
+  ]
+    .filter(Boolean)
+    .join(' ');
 
   return (
     <section className={`hero ${settings.useArrow ? 'hero-arrow' : 'hero-json'}`} aria-label="Format and actions">
@@ -87,11 +107,27 @@ export function Hero(props: HeroProps) {
           <button type="button" className="button" onClick={props.onCompare} disabled={!ready || busy}>
             Compare JSON · Arrow · Parquet
           </button>
+          <button
+            type="button"
+            className="button"
+            onClick={props.onCompareServers}
+            disabled={busy || props.servers.blockedReason !== null}
+          >
+            {props.servers.count >= 2 ? `Compare ${props.servers.count} servers` : 'Compare servers'}
+          </button>
           <button type="button" className="button" onClick={props.onBench} disabled={!ready || busy}>
             Server benchmark
           </button>
         </div>
         {blockedReason && !busy && <p className="hero-blocked">{blockedReason}</p>}
+        {serversHint && !busy && (
+          <p className="hero-blocked">
+            {serversHint}{' '}
+            <button type="button" className="link-button" onClick={props.onChooseServers}>
+              Choose servers
+            </button>
+          </p>
+        )}
         {busy && (
           <div className="progress" role="status" aria-live="polite">
             <div className="progress-text">
@@ -105,6 +141,7 @@ export function Hero(props: HeroProps) {
                       : ROLE_LABEL[progress.current.role]}{' '}
                     ·{' '}
                     {variantLabel(progress.current.request)}
+                    {progress.current.server && ` · ${progress.current.server.label}`}
                   </>
                 )}
                 …

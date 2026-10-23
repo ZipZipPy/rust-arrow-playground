@@ -1,7 +1,8 @@
-import { useState } from 'react';
+import type { Ref } from 'react';
 import type { ThemeChoice } from '../hooks/useTheme';
 import type { RttState } from '../hooks/useRtt';
 import type { ServerInfoState } from '../hooks/useServerInfo';
+import type { ServersState } from '../hooks/useServers';
 import type { DatasetInfo } from '../lib/types';
 import { targetLabel } from '../lib/api';
 import { formatBytes, formatCompact, formatMs } from '../lib/format';
@@ -15,6 +16,13 @@ interface HeaderProps {
   /** The selected dataset, for the size chip. */
   dataset: DatasetInfo | null;
   rtt: RttState;
+  /** The servers Compare servers runs against, listed in the connection panel. */
+  servers: ServersState;
+  /** The heading of that list, for moving the focus to it. */
+  serverListRef?: Ref<HTMLHeadingElement>;
+  /** Whether the connection panel is open. */
+  editing: boolean;
+  onEditingChange: (editing: boolean) => void;
   busy: boolean;
   theme: ThemeChoice;
   onCycleTheme: () => void;
@@ -52,8 +60,20 @@ function datasetTitle(d: DatasetInfo): string {
   return `${d.label}: ${rows}${key}`;
 }
 
-export function Header({ apiBase, onApiBaseChange, server, dataset, rtt, busy, theme, onCycleTheme }: HeaderProps) {
-  const [editing, setEditing] = useState(false);
+export function Header({
+  apiBase,
+  onApiBaseChange,
+  server,
+  dataset,
+  rtt,
+  servers,
+  serverListRef,
+  editing,
+  onEditingChange,
+  busy,
+  theme,
+  onCycleTheme,
+}: HeaderProps) {
   const { info } = server;
   const status = server.loading ? 'loading' : info ? 'ok' : 'error';
   const location = [info?.server.region, info?.server.service, info?.server.revision].filter(Boolean).join(' · ');
@@ -78,8 +98,8 @@ export function Header({ apiBase, onApiBaseChange, server, dataset, rtt, busy, t
             type="button"
             className="chip chip-button"
             aria-expanded={editing}
-            onClick={() => setEditing((v) => !v)}
-            title="Change the API server"
+            onClick={() => onEditingChange(!editing)}
+            title="Change the API server or pick servers to compare"
           >
             <span className={`status-dot status-${status}`} aria-hidden="true" />
             <span className="chip-label">Server</span>
@@ -138,10 +158,13 @@ export function Header({ apiBase, onApiBaseChange, server, dataset, rtt, busy, t
           loading={server.loading}
           onSave={(base) => {
             onApiBaseChange(base);
-            setEditing(false);
+            onEditingChange(false);
           }}
           onRetry={server.reload}
-          onClose={editing ? () => setEditing(false) : undefined}
+          onClose={editing ? () => onEditingChange(false) : undefined}
+          servers={servers}
+          serverListRef={serverListRef}
+          busy={busy}
         />
       )}
     </header>

@@ -11,6 +11,7 @@ const round3 = (v: number | null) => (v === null ? null : Math.round(v * 1000) /
 const COLUMNS: ExportColumn[] = [
   { header: 'time', value: (m) => m.at },
   { header: 'target', value: (m) => m.target },
+  { header: 'region', value: (m) => m.region },
   { header: 'dataset', value: (m) => m.dataset },
   { header: 'kind', value: (m) => m.kind },
   { header: 'variant', value: (m) => m.variant },

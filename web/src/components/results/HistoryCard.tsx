@@ -13,6 +13,8 @@ interface HistoryCardProps {
   onClear: () => void;
 }
 
+const KIND_BADGE: Partial<Record<Measurement['kind'], string>> = { compare: 'cmp', servers: 'srv' };
+
 const timeOfDay = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
 export function HistoryCard({ history, onClear }: HistoryCardProps) {
@@ -81,7 +83,7 @@ export function HistoryCard({ history, onClear }: HistoryCardProps) {
                 <tr key={m.id}>
                   <td className="nowrap">
                     {timeOfDay(m.at)}
-                    {m.kind === 'compare' && <span className="badge">cmp</span>}
+                    {KIND_BADGE[m.kind] && <span className="badge">{KIND_BADGE[m.kind]}</span>}
                   </td>
                   <td className="nowrap">{m.dataset}</td>
                   <td className="nowrap">
@@ -95,7 +97,10 @@ export function HistoryCard({ history, onClear }: HistoryCardProps) {
                   <td className="num">{formatBytes(m.wireBytes)}</td>
                   <td className="num">{formatBytes(m.payloadBytes)}</td>
                   <td>{m.contentEncoding ?? 'none'}</td>
-                  <td className="nowrap">{m.target}</td>
+                  <td className="nowrap">
+                    {m.target}
+                    {m.region && <span className="muted"> · {m.region}</span>}
+                  </td>
                 </tr>
               ))}
             </tbody>

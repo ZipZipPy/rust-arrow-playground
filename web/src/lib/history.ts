@@ -22,7 +22,7 @@ function isMeasurement(value: unknown): value is Measurement {
 /**
  * Fills in fields added after a measurement was saved. Earlier versions only
  * served `orders`, summed one column in the "use" step and did not record the
- * start-id mode.
+ * start-id mode or the server's region.
  */
 function upgrade(saved: Measurement): Measurement {
   const m = saved as Partial<Measurement> & Measurement;
@@ -33,6 +33,7 @@ function upgrade(saved: Measurement): Measurement {
     rowCache: typeof m.rowCache === 'boolean' ? m.rowCache : m.cache === 'hit' || m.cache === 'miss',
     compressMs: typeof m.compressMs === 'number' ? m.compressMs : null,
     useScope: USE_SCOPES.includes(m.useScope) ? m.useScope : 'column',
+    region: typeof m.region === 'string' ? m.region : null,
   };
 }
 

@@ -131,6 +131,15 @@ export async function fetchUnmeasured(base: string, request: DataRequest, signal
   await response.arrayBuffer();
 }
 
+export const PING_COUNT = 5;
+
+/** `PING_COUNT` sequential round trips to one server, for its RTT. */
+export async function pingSamples(base: string, signal?: AbortSignal): Promise<number[]> {
+  const samples: number[] = [];
+  for (let i = 0; i < PING_COUNT; i++) samples.push(await pingOnce(base, signal));
+  return samples;
+}
+
 /** One round-trip sample against `/api/ping` (204, empty body). */
 export async function pingOnce(base: string, signal?: AbortSignal): Promise<number> {
   prepareResourceTimingBuffer();

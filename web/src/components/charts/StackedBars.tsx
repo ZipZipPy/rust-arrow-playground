@@ -39,14 +39,23 @@ function PhaseTooltip({ row, focus }: { row: StackedRow; focus?: keyof PhaseTime
   );
 }
 
+interface StackedBarsProps {
+  rows: readonly StackedRow[];
+  caption: string;
+  /** The scale's end, to share one scale across several charts; defaults to the longest row. */
+  max?: number;
+  /** Set false when one legend below several charts explains them all. */
+  legend?: boolean;
+}
+
 /**
  * Horizontal stacked bars of request phases on one shared time scale, so rows
  * can be compared by length. Values for every segment are in the tooltip and
  * in the table each caller renders next to the chart.
  */
-export function StackedBars({ rows, caption }: { rows: readonly StackedRow[]; caption: string }) {
+export function StackedBars({ rows, caption, max: scale, legend = true }: StackedBarsProps) {
   const tip = useTooltip();
-  const max = Math.max(...rows.map((r) => r.total), 1e-9);
+  const max = scale ?? Math.max(...rows.map((r) => r.total), 1e-9);
   return (
     <figure className="chart">
       <figcaption className="sr-only">{caption}</figcaption>
@@ -82,7 +91,7 @@ export function StackedBars({ rows, caption }: { rows: readonly StackedRow[]; ca
           );
         })}
       </div>
-      <Legend items={PHASES.map((p) => PHASE_META[p])} />
+      {legend && <Legend items={PHASES.map((p) => PHASE_META[p])} />}
     </figure>
   );
 }

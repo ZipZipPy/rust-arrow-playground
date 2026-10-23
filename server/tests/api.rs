@@ -22,7 +22,7 @@ use playground::config::{ExportConfig, ServerInfo};
 use playground::encode::{self, ArrowContainer, CancelFlag, Encoding, Format, IpcCompression};
 use playground::query::RowsQuery;
 use playground::schema::{DATASETS, Dataset, ORDER_LINES, ORDERS, ORDERS_COLUMNS};
-use playground::server::{self, AppState, Settings};
+use playground::server::{self, AppState, SEED_CHECK_INTERVAL, SEED_CHECK_MAX_AGE, Settings};
 use playground::{db, export, seed};
 use serde_json::{Value, json};
 use tokio::sync::MutexGuard;
@@ -97,17 +97,28 @@ async fn app() -> Option<TestApp> {
 }
 
 fn router_with(database: &tokio_postgres::Config, static_dir: &Path, pool_size: usize) -> Router {
+    router_from(database, static_dir, pool_size, settings())
+}
+
+fn router_from(
+    database: &tokio_postgres::Config,
+    static_dir: &Path,
+    pool_size: usize,
+    settings: Settings,
+) -> Router {
     let pool = db::create_pool(database.clone(), pool_size).unwrap();
-    let state = AppState::new(
-        pool,
-        Settings {
-            max_rows: MAX_ROWS,
-            cache_entries: 4,
-            cache_max_rows: 10_000,
-            server_info: ServerInfo::from_env(),
-        },
-    );
-    server::router(state, static_dir)
+    server::router(AppState::new(pool, settings), static_dir)
+}
+
+fn settings() -> Settings {
+    Settings {
+        max_rows: MAX_ROWS,
+        cache_entries: 4,
+        cache_max_rows: 10_000,
+        seed_check_interval: SEED_CHECK_INTERVAL,
+        seed_check_max_age: SEED_CHECK_MAX_AGE,
+        server_info: ServerInfo::from_env(),
+    }
 }
 
 fn static_dir() -> PathBuf {
@@ -1242,7 +1253,9 @@ async fn row_cache_hits_on_repeated_requests() {
     let uncached = app.get("/api/data?rows=700&offset=1234&columns=id").await;
     assert_eq!(uncached.header("x-cache"), "off");
 
-    // A seed that finished since the rows were cached drops the whole cache.
+    // A seed that finished since the rows were cached drops the whole cache,
+    // once a hit after the check interval has re-read the generation in the
+    // background. Hits are served from the old generation until then.
     let client = app.client().await;
     client
         .execute(
@@ -1251,7 +1264,15 @@ async fn row_cache_hits_on_repeated_requests() {
         )
         .await
         .unwrap();
-    let after_reseed = app.get(uri).await;
+    tokio::time::sleep(SEED_CHECK_INTERVAL).await;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let after_reseed = loop {
+        let response = app.get(uri).await;
+        if response.header("x-cache") == "miss" || Instant::now() > deadline {
+            break response;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
     assert_eq!(after_reseed.header("x-cache"), "miss");
     assert_eq!(after_reseed.body, first.body);
     assert_eq!(app.get(uri).await.header("x-cache"), "hit");
@@ -1262,6 +1283,89 @@ async fn row_cache_hits_on_repeated_requests() {
         bench.header("x-cache"),
         "hit",
         "/api/bench shares the cache"
+    );
+}
+
+/// A cache hit needs no database connection, so it neither queues for a
+/// busy pool nor pays the round trip to a database in another region.
+#[tokio::test]
+async fn row_cache_hits_do_not_wait_for_the_database() {
+    let Some(app) = app().await else { return };
+    let router = router_with(&app.database, &static_dir(), 1);
+    let cached = "/api/data?rows=300&offset=4321&columns=id,email&cache=true";
+    let first = send(&router, Method::GET, cached, &[]).await;
+    assert_eq!(first.header("x-cache"), "miss");
+
+    // The pool's only connection waits for the lock in an uncached request.
+    let locker = app.client().await;
+    locker
+        .batch_execute("BEGIN; LOCK TABLE orders IN ACCESS EXCLUSIVE MODE")
+        .await
+        .unwrap();
+    let blocked = tokio::spawn({
+        let router = router.clone();
+        async move { send(&router, Method::GET, "/api/data?rows=10", &[]).await }
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!blocked.is_finished(), "blocked by the lock");
+
+    let hit = tokio::time::timeout(
+        Duration::from_secs(5),
+        send(&router, Method::GET, cached, &[]),
+    )
+    .await
+    .expect("a cache hit does not wait for a database connection");
+    assert_eq!(hit.header("x-cache"), "hit");
+    assert_eq!(hit.body, first.body);
+    assert!(hit.millis("x-db-ms") < 50.0, "{}", hit.header("x-db-ms"));
+
+    locker.batch_execute("ROLLBACK").await.unwrap();
+    let unblocked = blocked.await.unwrap();
+    assert_eq!(unblocked.status, StatusCode::OK);
+}
+
+/// After a quiet spell longer than the max age, the first hit reads the
+/// seed generation again before it is served, so it cannot serve rows of a
+/// seed that finished meanwhile; with the rows unchanged it is still a hit.
+#[tokio::test]
+async fn row_cache_rereads_the_seed_after_a_quiet_spell() {
+    let Some(app) = app().await else { return };
+    let max_age = Duration::from_millis(500);
+    let router = router_from(
+        &app.database,
+        &static_dir(),
+        2,
+        Settings {
+            // No background re-read: only the max age can notice a seed.
+            seed_check_interval: Duration::from_secs(3600),
+            seed_check_max_age: max_age,
+            ..settings()
+        },
+    );
+    let uri = "/api/data?rows=200&offset=2345&columns=id&cache=true";
+    let first = send(&router, Method::GET, uri, &[]).await;
+    assert_eq!(first.header("x-cache"), "miss");
+
+    tokio::time::sleep(max_age).await;
+    let unchanged = send(&router, Method::GET, uri, &[]).await;
+    assert_eq!(unchanged.header("x-cache"), "hit");
+    assert_eq!(unchanged.body, first.body);
+
+    app.client()
+        .await
+        .execute(
+            "UPDATE seed_status SET finished_at = clock_timestamp()",
+            &[],
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(max_age).await;
+    let reseeded = send(&router, Method::GET, uri, &[]).await;
+    assert_eq!(reseeded.header("x-cache"), "miss");
+    assert_eq!(reseeded.body, first.body);
+    assert_eq!(
+        send(&router, Method::GET, uri, &[]).await.header("x-cache"),
+        "hit"
     );
 }
 

@@ -1,8 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { pingOnce } from '../lib/measure';
+import { pingSamples } from '../lib/measure';
 import { median } from '../lib/stats';
-
-const PING_COUNT = 5;
 
 export interface RttState {
   medianMs: number | null;
@@ -25,11 +23,7 @@ export function useRtt(base: string, enabled: boolean): RttState {
     controllerRef.current = controller;
     setMeasuring(true);
     setError(null);
-    (async () => {
-      const next: number[] = [];
-      for (let i = 0; i < PING_COUNT; i++) next.push(await pingOnce(base, controller.signal));
-      return next;
-    })()
+    pingSamples(base, controller.signal)
       .then((next) => {
         if (controller.signal.aborted) return;
         setSamples(next);

@@ -9,6 +9,7 @@ import {
   speedup,
   summarize,
   summarizeByFormat,
+  summarizeByServer,
 } from './stats';
 
 describe('median / summarize', () => {
@@ -105,6 +106,17 @@ describe('counterpartSummary', () => {
     expect(counterpartSummary(history, makeMeasurement({ format: 'json', target: 'svc.run.app' }))).toBeNull();
   });
 
+  it('takes only the matching server’s requests from a Compare servers batch', () => {
+    const history = [
+      makeMeasurement({ kind: 'servers', format: 'json', batchId: 4, target: 'far.run.app', endToEndMs: 900 }),
+      makeMeasurement({ kind: 'servers', format: 'json', batchId: 4, endToEndMs: 100 }),
+      makeMeasurement({ kind: 'servers', format: 'json', batchId: 4, target: 'far.run.app', endToEndMs: 700 }),
+    ];
+    const json = counterpartSummary(history, makeMeasurement({ format: 'arrow', variant: 'Arrow IPC', target: 'far.run.app' }));
+    expect(json?.summary.count).toBe(2);
+    expect(json?.summary.endToEnd.median).toBe(800);
+  });
+
   it.each([
     ['dataset', { dataset: 'order_lines' }, 'order_lines', 'orders'],
     ['rows', { rowsRequested: 5000 }, '5,000', '1,000'],
@@ -152,5 +164,67 @@ describe('summarizeGroup', () => {
     expect(group?.decodeMs).toBe(2);
     expect(group?.useMs).toBe(2);
     expect(group?.browserMs).toBe(11);
+  });
+});
+
+describe('summarizeByServer', () => {
+  const at = (target: string, region: string | null, format: 'json' | 'arrow' | 'parquet', endToEndMs: number, wireBytes: number) =>
+    makeMeasurement({ kind: 'servers', target, region, format, variant: format, endToEndMs, wireBytes });
+
+  it('groups by server in first-seen order, then by format in JSON, Arrow, Parquet order', () => {
+    const items = [
+      at('same origin', null, 'parquet', 30, 200),
+      at('same origin', null, 'json', 100, 1000),
+      at('same origin', null, 'arrow', 20, 400),
+      at('far.run.app', 'us-central1', 'arrow', 220, 400),
+      at('far.run.app', 'us-central1', 'json', 600, 1000),
+      at('same origin', null, 'json', 120, 1000),
+      at('far.run.app', 'us-central1', 'parquet', 180, 200),
+      at('same origin', null, 'arrow', 30, 400),
+      at('same origin', null, 'parquet', 40, 200),
+    ];
+    const [near, far] = summarizeByServer(items);
+    expect(near).toMatchObject({ target: 'same origin', region: null, fastest: 'arrow' });
+    expect(near?.formats.map((g) => [g.format, g.count, g.endToEnd.median])).toEqual([
+      ['json', 2, 110],
+      ['arrow', 2, 25],
+      ['parquet', 2, 35],
+    ]);
+    expect(near?.arrowSpeedup).toBe(4.4);
+    expect(near?.arrowSize).toBe(0.4);
+    expect(far).toMatchObject({ target: 'far.run.app', region: 'us-central1', fastest: 'parquet' });
+    expect(far?.arrowSpeedup).toBeCloseTo(600 / 220);
+  });
+
+  it('counts the requests each server did not answer from its row cache', () => {
+    const items = [
+      makeMeasurement({ kind: 'servers', target: 'near', cache: 'hit' }),
+      makeMeasurement({ kind: 'servers', target: 'far', cache: 'hit' }),
+      makeMeasurement({ kind: 'servers', target: 'near', cache: 'hit' }),
+      makeMeasurement({ kind: 'servers', target: 'far', cache: 'miss' }),
+      makeMeasurement({ kind: 'servers', target: 'far', cache: null }),
+    ];
+    expect(summarizeByServer(items).map((s) => [s.target, s.cacheMisses])).toEqual([
+      ['near', 0],
+      ['far', 2],
+    ]);
+  });
+
+  it('names no fastest format and no Arrow vs JSON ratios until there is something to compare', () => {
+    const [only] = summarizeByServer([at('same origin', null, 'parquet', 30, 200)]);
+    expect(only).toMatchObject({ fastest: null, arrowSpeedup: null, arrowSize: null });
+    const [two] = summarizeByServer([at('same origin', null, 'parquet', 30, 200), at('same origin', null, 'json', 90, 900)]);
+    expect(two).toMatchObject({ fastest: 'parquet', arrowSpeedup: null, arrowSize: null });
+    expect(summarizeByServer([])).toEqual([]);
+  });
+
+  it('reports the rows each server returned', () => {
+    const rows = (target: string, rowCount: number) => makeMeasurement({ kind: 'servers', target, rowCount });
+    const summaries = summarizeByServer([rows('same origin', 50_000), rows('lb.example.com/eu', 100_000), rows('lb.example.com/us', 100_000)]);
+    expect(summaries.map((s) => [s.target, s.rowCount])).toEqual([
+      ['same origin', 50_000],
+      ['lb.example.com/eu', 100_000],
+      ['lb.example.com/us', 100_000],
+    ]);
   });
 });

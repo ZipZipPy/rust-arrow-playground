@@ -9,7 +9,8 @@ mod static_files;
 
 use std::net::SocketAddr;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
@@ -39,8 +40,23 @@ pub struct Settings {
     pub max_rows: u64,
     pub cache_entries: usize,
     pub cache_max_rows: usize,
+    /// How often cache hits re-read the seed generation (in the background).
+    pub seed_check_interval: Duration,
+    /// How old the last read of the seed generation may be for a cache hit
+    /// to be served from it; an older one is read again first, inline.
+    pub seed_check_max_age: Duration,
     pub server_info: ServerInfo,
 }
+
+/// See [`Settings::seed_check_interval`]: a re-seed is noticed within about
+/// this long, and back-to-back cache hits cost the database one tiny query
+/// per interval instead of one each.
+pub const SEED_CHECK_INTERVAL: Duration = Duration::from_secs(1);
+
+/// See [`Settings::seed_check_max_age`]: after a quiet spell this long, the
+/// first cache hit waits for one tiny query, so it cannot serve rows of a
+/// seed that finished meanwhile. Hits that keep coming never wait.
+pub const SEED_CHECK_MAX_AGE: Duration = Duration::from_secs(300);
 
 #[derive(Clone)]
 pub struct AppState(Arc<Inner>);
@@ -48,6 +64,7 @@ pub struct AppState(Arc<Inner>);
 struct Inner {
     pool: Pool,
     cache: RowCache,
+    seed_check: SeedCheck,
     /// One `/api/bench` at a time: each holds every fetched row plus its
     /// outputs, and runs the machine flat out.
     bench: Arc<Semaphore>,
@@ -68,6 +85,7 @@ impl AppState {
         Self(Arc::new(Inner {
             pool,
             cache: RowCache::new(settings.cache_entries, settings.cache_max_rows),
+            seed_check: SeedCheck::new(settings.seed_check_interval, settings.seed_check_max_age),
             bench: Arc::new(Semaphore::new(1)),
             max_rows: settings.max_rows,
             server_info: settings.server_info,
@@ -97,15 +115,31 @@ impl AppState {
 
     /// Reads the rows of `query`, from the cache when `use_cache` allows.
     ///
-    /// With the cache, the seed generation is read first (one tiny query,
-    /// counted as DB time) and the whole cache dropped if the data was
-    /// re-seeded since its entries were read.
+    /// A cache hit does not wait for the database, so its DB time is only
+    /// the lookup, even on a server far from the database. It is served from
+    /// the generation read last and, at most once per
+    /// [`Settings::seed_check_interval`], starts a background re-read of the
+    /// seed generation that drops the whole cache if the data was re-seeded.
+    /// A miss reads the generation before its rows, and so does a hit when
+    /// that read is older than [`Settings::seed_check_max_age`].
     pub async fn load_rows(
         &self,
         query: RowsQuery,
         use_cache: bool,
     ) -> Result<LoadedRows, ApiError> {
         let started = Instant::now();
+        if use_cache
+            && self.0.seed_check.is_recent()
+            && let Some(rows) = self.0.cache.get(&query)
+        {
+            self.check_seed_in_background();
+            return Ok(LoadedRows {
+                rows,
+                db_time: started.elapsed(),
+                cache: CacheStatus::Hit,
+            });
+        }
+
         let client = GuardedClient::new(self.0.pool.get().await?);
         if !use_cache {
             let fetched = db::fetch_rows(&client, &query).await;
@@ -119,8 +153,8 @@ impl AppState {
             });
         }
 
-        let status = db::seed_status(&client).await;
-        let generation = match status {
+        let read_at = self.0.seed_check.started();
+        let generation = match db::seed_status(&client).await {
             Ok(status) => status.map(|status| status.generation()),
             Err(err) => {
                 client.release();
@@ -128,6 +162,8 @@ impl AppState {
             }
         };
         drop_in_background(self.0.cache.sync_generation(generation));
+        self.0.seed_check.confirmed(read_at);
+        // After a quiet spell the rows are usually still cached and current.
         if let Some(rows) = self.0.cache.get(&query) {
             client.release();
             return Ok(LoadedRows {
@@ -146,6 +182,106 @@ impl AppState {
             db_time,
             cache: CacheStatus::Miss,
         })
+    }
+
+    /// Re-reads the seed generation off the request path, unless that was
+    /// done within the interval or is still running.
+    fn check_seed_in_background(&self) {
+        let Some(read_at) = self.0.seed_check.try_begin() else {
+            return;
+        };
+        let state = self.clone();
+        tokio::spawn(async move {
+            let result = async {
+                let client = GuardedClient::new(state.0.pool.get().await?);
+                let status = db::seed_status(&client).await;
+                client.release();
+                Ok::<_, ApiError>(status?.map(|status| status.generation()))
+            }
+            .await;
+            // A failure is logged where the error is made; a hit after the
+            // next interval tries again.
+            if let Ok(generation) = result {
+                drop_in_background(state.0.cache.sync_generation(generation));
+                state.0.seed_check.confirmed(read_at);
+            }
+            state.0.seed_check.end();
+        });
+    }
+}
+
+/// When the seed generation was last read for the row cache, and whether a
+/// background read is running.
+struct SeedCheck {
+    interval: Duration,
+    max_age: Duration,
+    reads: Mutex<SeedReads>,
+    running: AtomicBool,
+}
+
+#[derive(Default)]
+struct SeedReads {
+    /// The start of the last read, finished or not: background reads are
+    /// spaced from it.
+    started: Option<Instant>,
+    /// The start of the last read that succeeded: the cache matched the
+    /// database at least as recently as this.
+    confirmed: Option<Instant>,
+}
+
+impl SeedCheck {
+    fn new(interval: Duration, max_age: Duration) -> Self {
+        Self {
+            interval,
+            max_age,
+            reads: Mutex::default(),
+            running: AtomicBool::new(false),
+        }
+    }
+
+    fn reads(&self) -> MutexGuard<'_, SeedReads> {
+        self.reads.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Notes a read that starts now (a miss reads the generation inline),
+    /// and returns when.
+    fn started(&self) -> Instant {
+        let now = Instant::now();
+        self.reads().started = Some(now);
+        now
+    }
+
+    /// Notes that the read started at `at` succeeded.
+    fn confirmed(&self, at: Instant) {
+        let mut reads = self.reads();
+        if reads.confirmed.is_none_or(|confirmed| confirmed < at) {
+            reads.confirmed = Some(at);
+        }
+    }
+
+    /// Whether a hit may be served from the generation read last.
+    fn is_recent(&self) -> bool {
+        self.reads()
+            .confirmed
+            .is_some_and(|at| at.elapsed() < self.max_age)
+    }
+
+    /// Claims the background read when the last read started more than the
+    /// interval ago and none is running, and returns when it starts.
+    fn try_begin(&self) -> Option<Instant> {
+        let mut reads = self.reads();
+        if reads.started.is_some_and(|at| at.elapsed() < self.interval)
+            || self.running.swap(true, Ordering::AcqRel)
+        {
+            return None;
+        }
+        let now = Instant::now();
+        reads.started = Some(now);
+        Some(now)
+    }
+
+    fn end(&self) {
+        self.running.store(false, Ordering::Release);
     }
 }
 
@@ -230,6 +366,8 @@ pub async fn run(config: ServeConfig) -> anyhow::Result<()> {
             max_rows: config.max_rows,
             cache_entries: config.cache_entries,
             cache_max_rows: config.cache_max_rows,
+            seed_check_interval: SEED_CHECK_INTERVAL,
+            seed_check_max_age: SEED_CHECK_MAX_AGE,
             server_info: ServerInfo::from_env(),
         },
     );

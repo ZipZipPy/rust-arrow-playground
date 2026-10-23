@@ -216,6 +216,13 @@
   font-weight: 650;
 }
 
+.chart-title-note {
+  color: var(--muted);
+  font-size: 12.5px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
 .chart {
   min-width: 0;
 }
@@ -448,6 +455,72 @@
 .phase-table .legend-swatch {
   margin-right: 8px;
   vertical-align: -1px;
+}
+
+/* Compare servers: one row per server, the server column stays put while the formats scroll. */
+.servers-table tbody th,
+.servers-table thead th:first-child {
+  position: sticky;
+  left: 0;
+  min-width: 128px;
+  max-width: 200px;
+  background: var(--surface);
+  box-shadow: inset -1px 0 0 var(--grid);
+}
+
+.table-scroll .servers-table thead th:first-child {
+  z-index: 2;
+  background: var(--surface-2);
+}
+
+.servers-table tbody th,
+.servers-table td {
+  vertical-align: top;
+}
+
+.servers-table td.is-fastest {
+  background: var(--accent-soft);
+}
+
+.server-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.num .server-cell {
+  align-items: flex-end;
+}
+
+.server-cell-time {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 14px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.server-cell-wire {
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.server-split {
+  display: grid;
+  grid-template-columns: auto auto;
+  gap: 0 10px;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.server-split dd {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
 }
 
 .preview-table td {

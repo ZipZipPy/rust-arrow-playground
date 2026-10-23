@@ -9,10 +9,26 @@ import type { DataFormat, DataRequest, DatasetInfo } from './types';
  */
 export type PlanRole = 'warmup' | 'prime' | 'measure';
 
+/** Where a request goes when a plan spans several servers. */
+export interface PlanServer {
+  base: string;
+  /** Short name for the UI: the region, the host, or "This server". */
+  label: string;
+  region: string | null;
+}
+
 export interface PlannedRequest {
   request: DataRequest;
   role: PlanRole;
   round: number;
+  /** Set by plans that span several servers; otherwise the request goes to the runner's base. */
+  server?: PlanServer;
+}
+
+/** A server taking part in Compare servers, with its own entry for the dataset. */
+export interface ServerTarget {
+  server: PlanServer;
+  dataset: DatasetInfo;
 }
 
 export const COMPARE_FORMATS: readonly DataFormat[] = ['json', 'arrow', 'parquet'];
@@ -73,6 +89,58 @@ export function planCompare(s: Settings, dataset: DatasetInfo, random: () => num
     for (let i = 0; i < COMPARE_FORMATS.length; i++) {
       const format = COMPARE_FORMATS[(i + round) % COMPARE_FORMATS.length]!;
       plan.push({ request: buildRequest(s, format, offset, columns), role: 'measure', round });
+    }
+  }
+  return plan;
+}
+
+/**
+ * The key range every server has: the dataset entry with the smallest
+ * `max_key`, so a random start id leaves rows on all of them. A server that
+ * reports no `max_key` counts as empty, which pins random start ids to 0.
+ */
+export function narrowestKeyRange(datasets: readonly DatasetInfo[]): Pick<DatasetInfo, 'max_key' | 'row_estimate'> {
+  const key = (d: DatasetInfo) => d.max_key ?? 0;
+  const narrowest = datasets.reduce<DatasetInfo | null>((a, d) => (a === null || key(d) < key(a) ? d : a), null);
+  return { max_key: narrowest?.max_key ?? null, row_estimate: narrowest?.row_estimate ?? null };
+}
+
+/**
+ * Compare servers: Compare's interleaving, run against several servers. Every
+ * server warms up first, then each round visits the servers in an order that
+ * rotates like the formats do, and every request of a round, on every server
+ * and in every format, reads the same rows. The server row cache is always
+ * on and each server's rows are primed before it is measured: far servers
+ * reach the database across regions, and that query time would bury the
+ * network differences this mode is about.
+ */
+export function planCompareServers(
+  s: Settings,
+  targets: readonly ServerTarget[],
+  random: () => number = Math.random,
+): PlannedRequest[] {
+  const first = targets[0];
+  if (!first) return [];
+  const cached: Settings = { ...s, cache: true };
+  const dataset = { ...first.dataset, ...narrowestKeyRange(targets.map((t) => t.dataset)) };
+  const columns = columnsParam(cached, dataset.columns);
+  const warmup = warmupPlan(cached, dataset, COMPARE_FORMATS, random);
+  const plan = targets.flatMap(({ server }) => warmup.requests.map((p): PlannedRequest => ({ ...p, server })));
+  const warmed = warmup.offset === null ? [] : [warmup.offset];
+  const fetched = new Map(targets.map(({ server }) => [server.base, new Set<number>(warmed)]));
+  for (let round = 0; round < s.iterations; round++) {
+    const offset = nextOffset(cached, dataset, random);
+    for (let j = 0; j < targets.length; j++) {
+      const { server } = targets[(j + round) % targets.length]!;
+      const cachedOffsets = fetched.get(server.base)!;
+      if (!cachedOffsets.has(offset)) {
+        plan.push({ request: buildRequest(cached, PRIME_FORMAT, offset, columns), role: 'prime', round, server });
+        cachedOffsets.add(offset);
+      }
+      for (let i = 0; i < COMPARE_FORMATS.length; i++) {
+        const format = COMPARE_FORMATS[(i + round) % COMPARE_FORMATS.length]!;
+        plan.push({ request: buildRequest(cached, format, offset, columns), role: 'measure', round, server });
+      }
     }
   }
   return plan;

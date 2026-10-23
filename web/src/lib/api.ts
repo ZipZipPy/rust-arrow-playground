@@ -31,11 +31,16 @@ export function normalizeBaseUrl(raw: string): string {
   return `${url.origin}${path}`;
 }
 
-/** Short label for where requests go, used in the header and history. */
+/**
+ * Short label for where requests go, used in the header and history: the
+ * host, plus the path when the base has one, so two servers behind one host
+ * stay apart.
+ */
 export function targetLabel(base: string): string {
   if (base === '') return 'same origin';
   try {
-    return new URL(base).host;
+    const url = new URL(base);
+    return `${url.host}${url.pathname.replace(/\/+$/, '')}`;
   } catch {
     return base;
   }
@@ -120,6 +125,24 @@ async function getJson<T>(url: string, signal?: AbortSignal): Promise<T> {
   const res = await fetch(url, { cache: 'no-store', signal });
   if (!res.ok) throw await errorFromResponse(res);
   return (await res.json()) as T;
+}
+
+/**
+ * Runs `task` with a signal that also aborts after `ms`, and reports that
+ * case as "no answer within N s" instead of the browser's abort message.
+ */
+export async function withTimeout<T>(
+  ms: number,
+  signal: AbortSignal | undefined,
+  task: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+  const timeout = AbortSignal.timeout(ms);
+  try {
+    return await task(signal ? AbortSignal.any([signal, timeout]) : timeout);
+  } catch (e) {
+    if (timeout.aborted && !signal?.aborted) throw new Error(`no answer within ${ms / 1000} s`, { cause: e });
+    throw e;
+  }
 }
 
 export function fetchInfo(base: string, signal?: AbortSignal): Promise<ApiInfo> {

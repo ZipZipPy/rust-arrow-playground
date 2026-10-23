@@ -40,12 +40,18 @@ actually win back.
 - **Header**: which server you are measuring (same origin by default, or any
   *API base URL*, for example a Cloud Run service, saved in the browser),
   its region and row count, a live round-trip time, and a light/dark theme
-  switch.
+  switch. The same panel keeps a **server list** for Compare servers: add
+  URLs, tick the ones to compare, and see each one's region and RTT. A
+  `?servers=<url>,<url>` link adds and ticks servers in one go.
 - **Use Arrow** switch, the prominent control: off sends JSON; on sends Arrow
   IPC or Parquet. Next to it:
   - **Run** fetches with the current settings, *N* iterations.
   - **Compare JSON · Arrow · Parquet** runs all three formats with the same
     rows and columns, interleaved, *N* times each.
+  - **Compare servers** does the same against every ticked server (for
+    example one in your country and one abroad), interleaving servers and
+    formats, and always through each server's row cache, primed before each
+    round, so the database is left out.
   - **Server benchmark** asks the server to encode the same rows in every
     variant (JSON; Arrow with each IPC compression, with and without
     dictionaries; Parquet with each codec) and reports encode time and size,
@@ -81,6 +87,9 @@ actually win back.
     download, decode, use) and wire vs payload size, with rows/s and MB/s.
   - **Comparison**: median, min and max end-to-end time, median wire bytes,
     speed-up and size ratio relative to JSON, with grouped bars.
+  - **Servers**: one row per server with its region and RTT, and per
+    format the median end-to-end time, wire size, time to first byte,
+    download and decode, the fastest format highlighted, and Arrow vs JSON.
   - **Server benchmark** table with bars, a **data preview** of the first
     20 rows, a **history** of every request (copy as CSV or Markdown), and
     **How to read this**, which explains each number in plain words.
@@ -412,12 +421,39 @@ every format end to end.
 
 ## Deploying to Google Cloud
 
-[`deploy/gcp/README.md`](deploy/gcp/README.md) is the step-by-step plan:
-Artifact Registry, Cloud SQL for PostgreSQL 18 sized for tens of millions of
-rows, the database URL in Secret Manager, a Cloud Run job that seeds 20M
-rows, and a Cloud Run service sized for 1M-row responses, with notes on
-regions, measuring from different places, costs and teardown.
-`deploy/gcp/deploy.sh` runs it end to end.
+The cloud setup measures the same three formats over real internet links,
+from your browser to servers in your own country and abroad: one Cloud Run
+service per region, all reading one Cloud SQL for PostgreSQL 18 database
+(5 million orders by default). The **Compare servers** button in the UI
+runs JSON, Arrow IPC and Parquet against every server and shows them side
+by side; it reads through each server's row cache, so the times are the
+network, encoding and decoding, wherever the database is.
+
+Two ways to deploy, both running [`deploy/gcp/deploy.sh`](deploy/gcp/deploy.sh):
+
+- **GitHub Actions** (no local tools). Once per Google Cloud project, run
+  [`deploy/gcp/github-setup.sh`](deploy/gcp/github-setup.sh) in Cloud Shell
+  and put the project id and number it prints in
+  [`deploy/gcp/github.env`](deploy/gcp/github.env) (or the `GCP_PROJECT_ID`
+  and `GCP_PROJECT_NUMBER` repository variables). Then run the
+  **Google Cloud** workflow from the Actions tab with `deploy`, `pause`,
+  `resume` or `teardown` and the regions, nearest first. It signs in without
+  a stored key, and only runs of `main` can use it.
+- **Cloud Shell**: the *Open in Cloud Shell* button in
+  [`deploy/gcp/README.md`](deploy/gcp/README.md) clones the repository and
+  opens a [tutorial](deploy/gcp/TUTORIAL.md) that runs the script.
+
+```sh
+PROJECT_ID=my-project REGIONS="asia-southeast3 asia-southeast1 us-central1" deploy/gcp/deploy.sh
+```
+
+The script ends with each region's URL and a compare link,
+`https://<first>/?servers=https://<first>,https://<second>,...`, which adds
+those servers to the page's server list and ticks them.
+`deploy/gcp/pause.sh off` (and `on`) stops and resumes what bills by the
+hour, and `deploy/gcp/teardown.sh` deletes everything.
+[`deploy/gcp/README.md`](deploy/gcp/README.md) covers regions, how the
+traffic flows, sizing, costs and troubleshooting.
 
 ## Project layout
 
@@ -438,12 +474,12 @@ regions, measuring from different places, costs and teardown.
 │   │   └── export.rs        files on disk
 │   └── tests/               integration tests (TEST_DATABASE_URL)
 ├── web/                     Vite + React + TypeScript UI
-├── deploy/gcp/              Cloud Run + Cloud SQL plan and scripts
+├── deploy/gcp/              Cloud Run per region + one Cloud SQL: deploy, pause, teardown
+├── .github/workflows/       ci.yml, google-cloud.yml (deploys with deploy/gcp/)
 ├── docs/DESIGN.md           contracts: API, headers, columns, CLI, deployment
 ├── Dockerfile               one image: server binary + built UI
 ├── docker-compose.yml       db + seed + app
 ├── Makefile                 shortcuts for the commands above
-├── .github/workflows/ci.yml
 ├── rust-toolchain.toml      Rust 1.99.1
 └── .nvmrc, .node-version    Node.js 26.12.1
 ```

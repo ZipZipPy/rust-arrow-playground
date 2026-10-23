@@ -153,7 +153,7 @@ export function SettingsPanel({ settings: s, info, dataset, onChange, onDatasetC
           onChange={(cache) => onChange({ cache })}
           disabled={disabled}
           label="Server row cache"
-          description="Reuse rows already fetched for the same dataset, rows, start id and columns, to take PostgreSQL out of the picture. Compare loads each round’s rows first, so no format pays the query alone."
+          description="Reuse rows already fetched for the same dataset, rows, start id and columns, to take PostgreSQL out of the picture. Compare loads each round’s rows first, so no format pays the query alone. Compare servers always uses it."
         />
       </Section>
 
